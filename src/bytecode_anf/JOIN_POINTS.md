@@ -27,7 +27,7 @@ Merge:
 
 Problems:
 - First-order: selects by label, no compositional structure
-- Variable-major decomposition is unnatural — the predecessors are the
+- Variable-major decomposition is unnatural; the predecessors are the
   meaningful units, not the individual variables
 - No type signature per path
 - No linearity story
@@ -71,15 +71,15 @@ signatures.
 **Shared closure = additive &.** All methods close over the same
 pre-branch bindings. This is the defining property of the additive
 connective: context is shared, not split. Multiplicative ⊗ would split
-the context between branches — that's wrong for join points.
+the context between branches; that's wrong for join points.
 
 **Jumps are method calls.** A predecessor doesn't "jump to merge with
-label B0" — it calls `j.from_B0(values...)`. Dispatch is structural
+label B0"; it calls `j.from_B0(values...)`. Dispatch is structural
 (which method was invoked), not first-order (match on a tag).
 
 **Composable via cut.** Join points are methods. Composition is function
 composition. You can cut on one path's output without disturbing the
-others — exactly the cut rule of linear sequent calculus applied to the
+others: exactly the cut rule of linear sequent calculus applied to the
 Π–Σ type former.
 
 ### The Transposition
@@ -109,7 +109,7 @@ Same information, but the path-first decomposition:
 ```python
 @dataclass
 class ANFJoin:
-    """Codata join point — additive & over shared closure."""
+    """Codata join point: additive & over shared closure."""
     name: ANFVar
     fields: List[JoinField]     # one per predecessor path
 
@@ -122,12 +122,12 @@ class JoinField:
 
 @dataclass
 class JoinParam:
-    """A parameter of a join field — binding with optional type."""
+    """A parameter of a join field: binding with optional type."""
     var: ANFVar
     ann: Any = None             # type from abstract interpretation
 ```
 
-The shared closure is implicit — it's the lexical scope enclosing the
+The shared closure is implicit: it's the lexical scope enclosing the
 ANFJoin, same as how & shares Γ implicitly in the sequent calculus.
 
 ## How It Replaces Phi In Practice
@@ -167,17 +167,17 @@ B0: let x = 1; let y = "a"; j.from_B0(x, y)
 B1: let x = 2; let y = "b"; j.from_B1(x, y)
 ```
 
-Bodies happen to be identical here — a smart IR pass can share them.
+Bodies happen to be identical here; a smart IR pass can share them.
 But the representation doesn't force sharing; it falls out when
 appropriate.
 
 ## References
 
 - Carter Schonwald, "Linearity, Dependency, and Simultaneity: A Unified
-  Π–Σ Type Former for Linear Logic" (2026) — §4.4 (additive &),
+  Π–Σ Type Former for Linear Logic" (2026), §4.4 (additive &),
   Remark 3.1 (coinductive flavor of linear elimination)
-- SPJ et al., "Compiling without continuations" (2017) — join points in GHC
+- SPJ et al., "Compiling without continuations" (2017), join points in GHC
 - Abel et al., "Copatterns: Programming Infinite Structures by
-  Observations" (2013) — codata in Agda
+  Observations" (2013), codata in Agda
 - Zeilberger, "The Logical Basis of Evaluation Order and
-  Pattern-Matching" (2009) — polarity and focusing
+  Pattern-Matching" (2009), polarity and focusing

@@ -3,7 +3,7 @@ Opcode version provenance.
 
 Maps each CPython opcode to the Python version that introduced it
 and (optionally) the version that removed it. This is a reference
-for humans and tooling — the actual opcode handling is in
+for humans and tooling; the actual opcode handling is in
 stack_to_anf.py and builtin_transfers.py.
 
 Sources:

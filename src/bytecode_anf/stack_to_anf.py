@@ -813,7 +813,7 @@ class StackToANF:
 
         elif op in ('DELETE_FAST', 'DELETE_NAME', 'DELETE_GLOBAL',
                      'DELETE_DEREF'):
-            # Deletes — no stack effect, record as side effect
+            # Deletes: no stack effect, record as side effect
             self.bindings.append((self.fresh('del'),
                 ANFPrim(f'delete:{op}', [ANFAtom(arg)])))
 
@@ -858,7 +858,7 @@ class StackToANF:
 
         elif op in ('GET_AITER', 'GET_ANEXT', 'GET_AWAITABLE',
                      'GET_YIELD_FROM_ITER'):
-            # Async/generator iteration setup — replaces TOS
+            # Async/generator iteration setup: replaces TOS
             obj = self.pop()
             self.push(self.bind(ANFPrim(op.lower(), [obj]), hint='aw'))
 
@@ -870,7 +870,7 @@ class StackToANF:
             pass  # 3.x: sets up __annotations__ dict, no stack effect
 
         elif op in ('END_ASYNC_FOR', 'WITH_EXCEPT_START', 'BEFORE_WITH'):
-            # Complex exception/context opcodes — record as side effect
+            # Complex exception/context opcodes: record as side effect
             self.bindings.append((self.fresh('ctx'),
                 ANFPrim(f'ctx:{op}', [])))
 

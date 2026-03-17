@@ -43,7 +43,7 @@ introduced/removed).
 - `ANFBinding` replaces `Tuple[ANFVar, ANFExpr]` everywhere
 - `ANFBody` replaces `List[Tuple[...]]` + terminator
 - `KWArg` replaces `Optional[dict]` for keyword args
-- `ANFPhi` **removed** — replaced by `ANFJoin` (codata join points)
+- `ANFPhi` **removed**, replaced by `ANFJoin` (codata join points)
 - All frozen dataclasses with proper `__repr__`
 
 ### Codata Join Points
@@ -56,7 +56,7 @@ field is a predecessor path with its own type signature and body. All
 fields share the enclosing closure. Jumps are method calls.
 
 Theoretical foundation: Carter Schonwald, "Linearity, Dependency, and
-Simultaneity" (2026) — the n-ary additive & connective from the Π–Σ
+Simultaneity" (2026), the n-ary additive & connective from the Π–Σ
 type former.
 
 ## Current Sharp Spots
@@ -108,7 +108,7 @@ type former.
 - ANF node construction and repr
 - Stack-to-ANF conversion (basic, nested, locals, calls)
 - CFG building (linear, branching, loops)
-- Type lattice (join, meet, leq, from_value — full subtype DAG)
+- Type lattice (join, meet, leq, from_value; full subtype DAG)
 - Abstract stack (push/pop/join)
 - Transfer function registration (exact, family, precedence, isolation)
 - Abstract interpretation (type propagation, trace recording, CFG fixpoint)
@@ -118,8 +118,8 @@ type former.
 
 ## Key Design Decisions
 
-1. **Codata join points, not SSA phi** — see JOIN_POINTS.md
-2. **Scoped TransferRegistry** — avoid cross-analysis contamination
-3. **Subtype DAG for TypeLattice** — LCA-based join, not flat top
-4. **Per-opcode version provenance** — opcode_versions.py
-5. **Named types over anonymous tuples** — ANFBinding, ANFBody, etc.
+1. **Codata join points, not SSA phi**: see JOIN_POINTS.md
+2. **Scoped TransferRegistry**: avoid cross-analysis contamination
+3. **Subtype DAG for TypeLattice**: LCA-based join, not flat top
+4. **Per-opcode version provenance**: opcode_versions.py
+5. **Named types over anonymous tuples**: ANFBinding, ANFBody, etc.

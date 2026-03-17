@@ -2,7 +2,7 @@
 ANF (A-Normal Form) AST nodes.
 
 ANF requires all intermediate results to be let-bound.
-No nested compound expressions — only atomic subexpressions.
+No nested compound expressions; only atomic subexpressions.
 
 The stack machine naturally produces ANF: each operation
 consumes named operands from the stack and pushes a named result.
@@ -102,7 +102,7 @@ class ANFCall:
 class ANFBinding:
     """A single let-binding: var = rhs.
 
-    The fundamental unit of ANF — every intermediate result is named.
+    The fundamental unit of ANF: every intermediate result is named.
     """
     var: ANFVar
     rhs: Union[ANFAtom, ANFPrim, ANFCall]
@@ -195,7 +195,7 @@ ANFTerminator = Union[ANFBranch, ANFJump, ANFReturn]
 
 @dataclass(frozen=True)
 class JoinParam:
-    """A parameter of a join field — path-specific binding with type."""
+    """A parameter of a join field: path-specific binding with type."""
     var: ANFVar
     ann: Any = None  # annotation from abstract interpretation
 
@@ -227,7 +227,7 @@ class JoinField:
 
 @dataclass
 class ANFJoin:
-    """Codata join point — additive & over a shared closure.
+    """Codata join point: additive & over a shared closure.
 
     At a CFG merge, instead of SSA phi nodes (first-order data selection),
     we use a corecord where:
