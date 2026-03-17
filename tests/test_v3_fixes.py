@@ -1,10 +1,11 @@
 """Tests for v3 fixes: lattice precision, unpack ordering, registry isolation,
-ANFPhi, AnalysisState.equals, stack depth."""
+ANFJoin, AnalysisState.equals, stack depth."""
 
 import pytest
 import dis
 from bytecode_anf import (
-    ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet, ANFPhi,
+    ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet,
+    ANFJoin, JoinField, JoinParam,
     StackToANF, CFGBuilder, bytecode_to_anf, print_anf,
     AnnotationLattice, AnnotatedValue, AbstractStack,
     AbstractInterpreter, TransferRegistry,
@@ -141,14 +142,15 @@ class TestUnpackOrdering:
 
         # On 3.14+: a, b bound directly from LOAD_SMALL_INT + STORE_FAST_STORE_FAST
         # On <=3.12: a, b bound via UNPACK_SEQUENCE
-        unpack_bindings = [b for b in bindings
-                          if hasattr(b[1], 'op') and b[1].op == 'unpack']
+        unpack_bindings = [(v, rhs) for v, rhs in bindings
+                          if isinstance(rhs, ANFPrim) and rhs.op == 'unpack']
         if unpack_bindings:
             # Pre-3.13 path: verify unpack indices
             indices = []
             for _, rhs in unpack_bindings:
+                assert isinstance(rhs, ANFPrim)
                 idx_arg = rhs.args[1]
-                if hasattr(idx_arg, 'value') and isinstance(idx_arg.value, int):
+                if isinstance(idx_arg, ANFAtom) and isinstance(idx_arg.value, int):
                     indices.append(idx_arg.value)
             assert 0 in indices
             assert 1 in indices
@@ -157,9 +159,8 @@ class TestUnpackOrdering:
             # a should get 0, b should get 1
             a_rhs = a_binding[1]
             b_rhs = b_binding[1]
-            # Both should be ANFAtom with integer values
-            assert hasattr(a_rhs, 'value'), f"Expected ANFAtom for a, got {type(a_rhs)}"
-            assert hasattr(b_rhs, 'value'), f"Expected ANFAtom for b, got {type(b_rhs)}"
+            assert isinstance(a_rhs, ANFAtom), f"Expected ANFAtom for a, got {type(a_rhs)}"
+            assert isinstance(b_rhs, ANFAtom), f"Expected ANFAtom for b, got {type(b_rhs)}"
 
     def test_triple_unpack(self):
         """x, y, z = 1, 2, 3"""
@@ -259,34 +260,38 @@ class TestTransferRegistryIsolation:
 
 
 # ============================================================
-# ANFPhi node
+# ANFJoin (codata join points)
 # ============================================================
 
-class TestANFPhi:
-    """Test phi node construction and repr."""
+class TestANFJoin:
+    """Test codata join point construction."""
 
-    def test_phi_construction(self):
-        a = ANFAtom(ANFVar("x"))
-        b = ANFAtom(ANFVar("y"))
-        phi = ANFPhi(args=[(0, a), (1, b)])
-        assert len(phi.args) == 2
+    def test_join_construction(self):
+        j = ANFJoin(name=ANFVar("j1"))
+        f = JoinField(label=0, params=[JoinParam(ANFVar("x"), ann="int")])
+        j.fields.append(f)
+        assert len(j.fields) == 1
+        assert j.fields[0].label == 0
 
-    def test_phi_repr(self):
-        a = ANFAtom(ANFVar("x"))
-        b = ANFAtom(ANFVar("y"))
-        phi = ANFPhi(args=[(0, a), (1, b)])
-        r = repr(phi)
-        assert "phi" in r
-        assert "B0" in r
-        assert "B1" in r
+    def test_join_repr(self):
+        j = ANFJoin(
+            name=ANFVar("j1"),
+            fields=[
+                JoinField(label=0, params=[JoinParam(ANFVar("x"))]),
+                JoinField(label=10, params=[JoinParam(ANFVar("y"))]),
+            ]
+        )
+        r = repr(j)
+        assert "join" in r
+        assert "j1" in r
 
-    def test_phi_in_let(self):
-        """ANFPhi should be valid as ANFLet rhs."""
-        a = ANFAtom(ANFVar("x"))
-        b = ANFAtom(ANFVar("y"))
-        phi = ANFPhi(args=[(0, a), (1, b)])
-        let = ANFLet(var=ANFVar("z"), rhs=phi)
-        assert let.var.name == "z"
+    def test_join_field_with_ann(self):
+        p = JoinParam(ANFVar("z"), ann="num")
+        assert repr(p) == "z:num"
+
+    def test_join_field_no_ann(self):
+        p = JoinParam(ANFVar("z"))
+        assert repr(p) == "z"
 
 
 # ============================================================
