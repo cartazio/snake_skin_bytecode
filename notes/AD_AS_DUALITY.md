@@ -9,7 +9,7 @@
 
 The AD literature's "tape" is implementation-brained nonsense from the 1970s. It describes data structure (linear recording) rather than semantics.
 
-What's actually happening:
+Semantics:
 
 | "Tape" term | Actual structure |
 |-------------|------------------|
@@ -125,7 +125,7 @@ The adjoint of & is ⊕. Join points in the primal become split points in the du
 
 ---
 
-## Why This Framing Matters
+## Consequence
 
 "Tape" hides structure. The actual picture:
 
@@ -142,7 +142,7 @@ No tape. No recording. Just the program and its dual.
 
 ---
 
-## Implications for Implementation
+## Implementation
 
 Given ANF with codata join points:
 
