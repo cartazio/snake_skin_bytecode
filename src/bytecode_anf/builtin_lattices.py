@@ -57,6 +57,8 @@ class TypeLattice(AnnotationLattice[SimpleType]):
     SET = SimpleType("set")
     CALLABLE = SimpleType("callable")
     ITERATOR = SimpleType("iterator")
+    TYPE = SimpleType("type")    # class/type objects (themselves PyObjects)
+    MODULE = SimpleType("module")
     
     # Compound types
     NUM = SimpleType("num")      # int | float
@@ -100,6 +102,8 @@ class TypeLattice(AnnotationLattice[SimpleType]):
                 self.SET:    frozenset({self.ANY}),
                 self.CALLABLE: frozenset({self.ANY}),
                 self.ITERATOR: frozenset({self.ANY}),
+                self.TYPE:   frozenset({self.CALLABLE}),  # types are callable (instantiation)
+                self.MODULE: frozenset({self.ANY}),
                 self.ANY:    frozenset(),
             }
         return TypeLattice._PARENTS
@@ -190,6 +194,11 @@ class TypeLattice(AnnotationLattice[SimpleType]):
             return self.DICT
         if isinstance(value, set):
             return self.SET
+        if isinstance(value, type):
+            return self.TYPE
+        import types
+        if isinstance(value, types.ModuleType):
+            return self.MODULE
         if callable(value):
             return self.CALLABLE
         return self.ANY

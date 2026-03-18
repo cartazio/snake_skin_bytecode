@@ -7,6 +7,10 @@ No nested compound expressions; only atomic subexpressions.
 The stack machine naturally produces ANF: each operation
 consumes named operands from the stack and pushes a named result.
 
+Value model: All values are references to heap-allocated PyObjects.
+There are no unboxed values in Python semantics. A constant like 42
+is a reference to an int object on the heap (possibly cached).
+
 Join points follow codata/additive-& semantics (shared closure,
 per-path observations) rather than SSA-style phi nodes.
 """
@@ -16,11 +20,74 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 
+# === Object references ===
+
+@dataclass(frozen=True)
+class PyObjRef:
+    """Reference to a heap-allocated Python object.
+
+    All Python values are references to objects. This makes the
+    indirection explicit in the IR rather than hiding it behind
+    raw Python values.
+
+    Every PyObject has an ob_type pointer to its type (a PyTypeObject),
+    and types are themselves objects. Classes, instances, functions,
+    modules -- everything is a PyObject on the heap.
+
+    - const_ref: reference to a known constant object (e.g. int(42))
+    - var_ref: reference held by a variable (ANFVar)
+    - type_ref: reference to a class/type object (also a PyObject)
+
+    The identity of the referenced object matters for mutable types
+    (aliasing), but not for immutable types (int, float, str, tuple, etc.).
+    Objects with user-defined classes carry:
+    - ob_type: pointer to their class (a type object)
+    - __dict__: attribute namespace (itself a dict object)
+    - __class__: accessible reference back to the type
+
+    TODO: This is currently a shallow embedding — host-language Python
+    values standing in for object-language datums. A proper treatment
+    would define an explicit closed datatype for representable Python
+    values (PyDatum), likely as a singleton-indexed space (each Python
+    literal type maps to exactly one IR datum constructor). General
+    runtime objects that aren't embeddable literals would remain
+    symbolic (referenced only via ANFVar from computation results).
+    """
+    value: Union[ANFVar, int, float, str, bool, None, tuple, frozenset, bytes, type]
+
+    def __repr__(self) -> str:
+        if isinstance(self.value, ANFVar):
+            return repr(self.value)
+        if isinstance(self.value, type):
+            return f"&<class {self.value.__name__!r}>"
+        return f"&{self.value!r}"
+
+    @property
+    def is_var(self) -> bool:
+        """True if this is a reference held by a variable."""
+        return isinstance(self.value, ANFVar)
+
+    @property
+    def is_const(self) -> bool:
+        """True if this is a reference to a known constant object."""
+        return not self.is_var
+
+    @property
+    def is_type(self) -> bool:
+        """True if this is a reference to a class/type object."""
+        return isinstance(self.value, type)
+
+
 # === Atoms and variables ===
 
 @dataclass(frozen=True)
 class ANFVar:
-    """A variable name in ANF."""
+    """A variable name in ANF.
+
+    In Python semantics, a variable is a name bound to a PyObject reference.
+    Rebinding (STORE_FAST) changes which object the name references;
+    it does not mutate the referenced object.
+    """
     name: str
 
     def __repr__(self) -> str:
@@ -30,11 +97,14 @@ class ANFVar:
 @dataclass(frozen=True)
 class ANFAtom:
     """
-    Atomic expression: variable reference or constant.
+    Atomic expression: a reference to a Python object.
 
     In ANF, all operands must be atomic (no nested compound expressions).
+    All values are PyObject references — either via a variable name
+    or as a reference to a known constant object (including classes/types,
+    which are themselves objects).
     """
-    value: Union[ANFVar, int, float, str, bool, None, tuple, frozenset]
+    value: Union[ANFVar, int, float, str, bool, None, tuple, frozenset, type]
 
     def __repr__(self) -> str:
         if isinstance(self.value, ANFVar):
@@ -49,6 +119,10 @@ class ANFAtom:
     def is_const(self) -> bool:
         return not self.is_var
 
+    def as_ref(self) -> PyObjRef:
+        """Convert to explicit PyObjRef."""
+        return PyObjRef(self.value)
+
 
 # === Compound expressions ===
 
@@ -57,7 +131,9 @@ class ANFPrim:
     """
     Primitive operation application.
 
-    All arguments must be atomic (ANFAtom).
+    All arguments must be atomic (ANFAtom), i.e. references to PyObjects.
+    The result is a fresh PyObject reference (arithmetic, comparisons)
+    or a side-effecting operation on the heap (setattr, setitem, etc.).
     """
     op: str
     args: List[ANFAtom]
@@ -82,7 +158,8 @@ class ANFCall:
     """
     Function call.
 
-    Both func and all args must be atomic.
+    Both func and all args must be atomic (PyObject references).
+    Returns a fresh PyObject reference.
     """
     func: ANFAtom
     args: List[ANFAtom]
@@ -103,6 +180,9 @@ class ANFBinding:
     """A single let-binding: var = rhs.
 
     The fundamental unit of ANF: every intermediate result is named.
+    Semantically: bind the name `var` to the PyObject reference
+    produced by evaluating `rhs`. This is pointer assignment, not
+    object copy.
     """
     var: ANFVar
     rhs: Union[ANFAtom, ANFPrim, ANFCall]

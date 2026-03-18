@@ -10,6 +10,7 @@ Each PUSH creates a binding, each POP consumes one.
 """
 
 from .anf import (
+    PyObjRef,
     ANFVar,
     ANFAtom,
     ANFPrim,
@@ -52,6 +53,8 @@ from .opcode_versions import (
 )
 
 __all__ = [
+    # Value model
+    "PyObjRef",
     # ANF AST nodes
     "ANFVar",
     "ANFAtom",
