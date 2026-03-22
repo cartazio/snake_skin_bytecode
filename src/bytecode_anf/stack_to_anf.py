@@ -89,12 +89,17 @@ class CFGBuilder:
         for i, instr in enumerate(self.instructions):
             op = instr.opname
             
-            if op in self.JUMPS or op in self.TERMINATORS:
-                # Jump target is a leader
+            if op in self.JUMPS:
+                # Jump target is a leader (only for actual jumps, not terminators)
                 if instr.argval is not None and isinstance(instr.argval, int):
                     self.leaders.add(instr.argval)
                 
                 # Fall-through (next instruction) is a leader
+                if i + 1 < len(self.instructions):
+                    self.leaders.add(self.instructions[i + 1].offset)
+            elif op in self.TERMINATORS:
+                # Terminators end blocks but don't have jump targets
+                # (RETURN_CONST argval is the constant value, not an offset!)
                 if i + 1 < len(self.instructions):
                     self.leaders.add(self.instructions[i + 1].offset)
         
@@ -202,14 +207,21 @@ class StackToANF:
         if code is None:
             raise ValueError("No code object provided")
         
-        for instr in dis.Bytecode(code):
-            self.step(instr)
+        instructions = list(dis.Bytecode(code))
+        for i, instr in enumerate(instructions):
+            # Compute next instruction offset for branch fallthrough calculation
+            next_offset = instructions[i + 1].offset if i + 1 < len(instructions) else None
+            self.step(instr, next_offset=next_offset)
         
         return self.bindings, self.stack
     
-    def step(self, instr) -> Optional[ANFTerminator]:
+    def step(self, instr, next_offset: Optional[int] = None) -> Optional[ANFTerminator]:
         """
         Process one bytecode instruction.
+        
+        Args:
+            instr: The bytecode instruction to process
+            next_offset: Offset of the next instruction (for fallthrough branches)
         
         Returns a terminator if this instruction ends the block.
         """
@@ -473,21 +485,26 @@ class StackToANF:
         
         elif op == 'POP_JUMP_IF_FALSE':
             cond = self.pop()
-            return ANFBranch(cond, instr.offset + 2, arg)
+            # Fallthrough is next instruction, not hardcoded +2 (CACHE entries may intervene)
+            fallthrough = next_offset if next_offset is not None else instr.offset + 2
+            return ANFBranch(cond, fallthrough, arg)
         
         elif op == 'POP_JUMP_IF_TRUE':
             cond = self.pop()
-            return ANFBranch(cond, arg, instr.offset + 2)
+            fallthrough = next_offset if next_offset is not None else instr.offset + 2
+            return ANFBranch(cond, arg, fallthrough)
         
         elif op == 'POP_JUMP_IF_NONE':
             val = self.pop()
             cond = self.bind(ANFPrim('is', [val, ANFAtom(None)]), hint='c')
-            return ANFBranch(cond, arg, instr.offset + 2)
+            fallthrough = next_offset if next_offset is not None else instr.offset + 2
+            return ANFBranch(cond, arg, fallthrough)
         
         elif op == 'POP_JUMP_IF_NOT_NONE':
             val = self.pop()
             cond = self.bind(ANFPrim('is-not', [val, ANFAtom(None)]), hint='c')
-            return ANFBranch(cond, arg, instr.offset + 2)
+            fallthrough = next_offset if next_offset is not None else instr.offset + 2
+            return ANFBranch(cond, arg, fallthrough)
         
         elif op in ('JUMP_FORWARD', 'JUMP_BACKWARD', 'JUMP_ABSOLUTE', 
                     'JUMP_BACKWARD_NO_INTERRUPT'):
@@ -587,10 +604,13 @@ class StackToANF:
 
         elif op == 'LOAD_SUPER_ATTR':
             # 3.12: super() attribute access
-            attr_name = self.pop()
-            cls = self.pop()
-            self_val = self.pop()
-            self.push(self.bind(ANFPrim('super_attr', [self_val, cls, attr_name]), hint='sa'))
+            # Stack: [global_super, __class__, self] -> pops 3, attr name is in argval
+            # See CPython ceval.c: LOAD_SUPER_ATTR pops super, class, self; attr from oparg
+            self_val = self.pop()   # TOS: self instance
+            cls = self.pop()        # TOS1: __class__
+            super_fn = self.pop()   # TOS2: super (the builtin)
+            attr_name = ANFAtom(arg)  # attr name from instr.argval
+            self.push(self.bind(ANFPrim('super_attr', [super_fn, cls, self_val, attr_name]), hint='sa'))
 
         elif op == 'CALL_INTRINSIC_1':
             a = self.pop()
@@ -659,15 +679,38 @@ class StackToANF:
 
         elif op == 'CALL_KW':
             # 3.13: call with keyword arguments
-            # Stack: callable, self/NULL, positional args..., kw names tuple
-            kw_names = self.pop()
+            # Stack: callable, self/NULL, positional args..., keyword args..., kw_names_tuple
+            # The kw_names tuple is pushed via LOAD_CONST before CALL_KW
+            # instr.arg is total argument count (positional + keyword)
+            kw_names_atom = self.pop()  # Pop the kw_names tuple from stack
             argc = instr.arg
-            args = self.pop_n(argc)
+            
+            # Extract the actual tuple from the ANFAtom
+            kw_names_tuple = kw_names_atom.value if isinstance(kw_names_atom, ANFAtom) else None
+            if isinstance(kw_names_tuple, tuple):
+                n_kwargs = len(kw_names_tuple)
+            else:
+                # Couldn't extract tuple - treat all as positional
+                n_kwargs = 0
+                kw_names_tuple = ()
+            
+            n_positional = argc - n_kwargs
+            
+            # Pop all args (keyword args are on top of stack, then positional)
+            all_args = self.pop_n(argc)
+            positional_args = all_args[:n_positional]
+            kw_arg_values = all_args[n_positional:]
+            
             func = self.pop()
             # Pop NULL if present (3.11+ calling convention)
             if self.stack and self.stack[-1].value is None:
                 self.pop()
-            result = self.bind(ANFCall(func, args), hint='r')
+            
+            # Build KWArg list from names and values
+            from .anf import KWArg
+            kwargs = [KWArg(name, val) for name, val in zip(kw_names_tuple, kw_arg_values)] if kw_names_tuple else None
+            
+            result = self.bind(ANFCall(func, positional_args, kwargs=kwargs), hint='r')
             self.push(result)
 
         elif op == 'LOAD_COMMON_CONSTANT':
