@@ -1,5 +1,13 @@
 # Editing TODOs
 
+**Author**: Carter Schonwald  
+**Created**: 2026-03-17T17:38:00-04:00  
+**Updated**: 2026-03-22T11:48:00-04:00
+
+## Changelog
+- 2026-03-17T17:38-04:00: Initial editing task list
+- 2026-03-22T11:48-04:00: Moved to writings/handoffs/
+
 ## Small / mechanical
 
 - [ ] Commit current `notes/AD_AS_DUALITY.md` heading cleanup

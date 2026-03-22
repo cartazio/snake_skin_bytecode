@@ -1,8 +1,14 @@
 # bytecode-anf Design Document
 
 **Author**: Carter Schonwald  
+**Created**: 2026-03-16  
+**Updated**: 2026-03-16  
 **Version**: 1.0  
 **Target**: Python 3.11+, degrades gracefully to 3.10
+
+## Changelog
+- 2026-03-16: Initial design doc
+- 2026-03-16: Tightened prose, added tables
 
 ---
 

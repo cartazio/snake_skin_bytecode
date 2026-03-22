@@ -1,8 +1,15 @@
 # bytecode-anf Status
 
-**Last updated**: 2026-03-16  
+**Author**: Carter Schonwald  
+**Created**: 2026-03-16T21:00:00-04:00  
+**Updated**: 2026-03-22T11:48:00-04:00  
 **Python**: 3.10–3.14 (tested on 3.14.3)  
 **Version**: 0.4.0
+
+## Changelog
+- 2026-03-16T21:00-04:00: Initial status doc
+- 2026-03-16T21:30-04:00: v0.4.0 release notes
+- 2026-03-22T11:48-04:00: Moved to writings/handoffs/
 
 ---
 

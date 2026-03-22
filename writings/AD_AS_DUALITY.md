@@ -1,7 +1,12 @@
 # AD as Duality: Structural Rules and the Adjoint Program
 
 **Author**: Carter Schonwald  
-**Context**: bytecode-anf theoretical notes, March 2026
+**Created**: 2026-03-16  
+**Updated**: 2026-03-17
+
+## Changelog
+- 2026-03-16: Initial theory notes
+- 2026-03-17: Heading cleanup (Semantics, Consequence, Implementation)
 
 ---
 

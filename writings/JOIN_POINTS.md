@@ -1,7 +1,12 @@
 # Join Points: Codata Replaces Phi
 
 **Author**: Carter Schonwald  
-**Context**: bytecode-anf IR design, March 2026
+**Created**: 2026-03-16  
+**Updated**: 2026-03-16
+
+## Changelog
+- 2026-03-16: Initial design rationale
+- 2026-03-16: Tightened prose
 
 ---
 
