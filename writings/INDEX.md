@@ -11,6 +11,7 @@
 | [DESIGN.md](DESIGN.md) | Architecture, module map, sharp spots | 2026-03-16 | 2026-03-16 |
 | [JOIN_POINTS.md](JOIN_POINTS.md) | Codata join point design (replaces SSA phi) | 2026-03-16 | 2026-03-16 |
 | [AD_AS_DUALITY.md](AD_AS_DUALITY.md) | AD as adjoint duality, not "tape" | 2026-03-16 | 2026-03-17 |
+| [corecord-unification/](corecord-unification/) | Corecord as universal IR construction (md + LaTeX/TikZ) | 2026-03-22 | 2026-03-22 |
 
 ## Handoffs & Tasks (writings/handoffs/)
 

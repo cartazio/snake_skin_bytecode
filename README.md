@@ -2,39 +2,17 @@
 
 Recover ANF-style AST from Python bytecode with annotation flow.
 
-## Foundation
+## Scope
 
-Two classic results:
+1. Turn arbitrary Python bytecode into a genuinely nice compiler IR: state of the art with neat general constructs.
 
-1. **Danvy's Defunctionalization**: Stack machines and CPS/ANF are syntactically isomorphic. Stack positions are implicit continuation variables. PUSH = let-binding, POP = variable use.
-
-2. **Cousot & Cousot's Abstract Interpretation**: Compute program properties by executing over abstract domains (lattices) with computable transfer functions.
-
-We simulate the bytecode stack with abstract values, producing ANF while propagating annotations through the lattice.
-
-## Computability
-
-For all Python bytecode B, ANF recovery terminates:
-
-- Finite instruction set: `len(dis.opmap) == 140`
-- Computable stack effects: `dis.stack_effect(opcode, arg)` is total
-- Bounded stack: `code.co_stacksize`
-- Finite CFG: bytecode length bounds node count
-- Local transform: each instruction maps stack[i] → stack[i'] deterministically
-- Finite-height lattice: fixpoint terminates (or use widening)
-
-Complexity: O(|B|) for straight-line code, O(|B| × lattice_height) for loops.
+2. A generic, user-extensible bytecode abstract interpreter toolkit.
 
 ## Install
 
 ```bash
-pip install bytecode-anf
-```
-
-From source:
-```bash
-git clone https://github.com/cartazio/bytecode-anf
-cd bytecode-anf
+git clone https://github.com/cartazio/snake_skin_bytecode
+cd snake_skin_bytecode
 pip install -e .
 ```
 
@@ -121,27 +99,9 @@ class TaintLattice(AnnotationLattice[TaintLevel]):
     def leq(self, a, b): return a.level <= b.level
 ```
 
-## API
+## Docs
 
-### ANF Nodes
-
-`ANFVar`, `ANFAtom`, `ANFPrim`, `ANFCall`, `ANFLet`, `ANFBinding`, `ANFBody`, `ANFJoin`, `ANFBranch`, `ANFJump`, `ANFReturn`
-
-### Conversion
-
-`StackToANF`, `CFGBuilder`, `bytecode_to_anf`, `print_anf`
-
-### Abstract Interpretation
-
-`AnnotationLattice`, `AnnotatedValue`, `AbstractStack`, `AbstractInterpreter`
-
-### Transfer DSL
-
-`@annotates`, `@annotates_family`, `TransferRegistry`, `get_transfer`, `clear_transfers`
-
-### Built-in
-
-`TypeLattice`, `SimpleType`
+The API and design are still evolving—no stable inter-version API yet.
 
 ## License
 
