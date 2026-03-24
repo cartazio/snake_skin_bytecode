@@ -17,7 +17,9 @@ from types import CodeType
 
 from .anf import (
     ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet,
-    ANFBranch, ANFJump, ANFReturn, ANFExpr, ANFTerminator
+    ANFBody, ANFBinding, ANFJoin, JoinField, JoinParam,
+    ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin,
+    ANFExpr, ANFTerminator,
 )
 
 
@@ -29,18 +31,18 @@ class BasicBlock:
     Contains straight-line ANF bindings and a terminator.
     """
     label: int  # Bytecode offset of first instruction
-    bindings: List[Tuple[ANFVar, ANFExpr]] = field(default_factory=list)
+    bindings: List[ANFBinding] = field(default_factory=list)
     terminator: Optional[ANFTerminator] = None
     predecessors: List[int] = field(default_factory=list)
     successors: List[int] = field(default_factory=list)
     
     def add_binding(self, var: ANFVar, rhs: ANFExpr) -> None:
-        self.bindings.append((var, rhs))
+        self.bindings.append(ANFBinding(var, rhs))
     
     def __repr__(self) -> str:
         lines = [f"BB{self.label}:"]
-        for var, rhs in self.bindings:
-            lines.append(f"  let {var} = {rhs}")
+        for binding in self.bindings:
+            lines.append(f"  {binding}")
         if self.terminator:
             lines.append(f"  {self.terminator}")
         return "\n".join(lines)
@@ -108,41 +110,51 @@ class CFGBuilder:
     def build(self) -> Dict[int, BasicBlock]:
         """Build the CFG and return the blocks."""
         leaders = self.find_leaders()
-        
+
         # Create blocks
         for leader in leaders:
             self.blocks[leader] = BasicBlock(label=leader)
-        
-        # Assign instructions to blocks and compute edges
-        current_label = 0
-        
-        for instr in self.instructions:
-            if instr.offset in self.leaders and instr.offset != 0:
-                current_label = instr.offset
-            
-            block = self.blocks[current_label]
-            op = instr.opname
-            
-            # Compute successor edges
+
+        sorted_leaders = sorted(leaders)
+
+        def add_edge(src: int, dst: int) -> None:
+            if dst not in self.blocks[src].successors:
+                self.blocks[src].successors.append(dst)
+            if src not in self.blocks[dst].predecessors:
+                self.blocks[dst].predecessors.append(src)
+
+        # Compute edges from each block's terminal instruction.
+        for i, label in enumerate(sorted_leaders):
+            next_leader = sorted_leaders[i + 1] if i + 1 < len(sorted_leaders) else None
+
+            block_instructions = [
+                instr for instr in self.instructions
+                if label <= instr.offset < (next_leader if next_leader is not None else 2**31)
+            ]
+            if not block_instructions:
+                continue
+
+            last_instr = block_instructions[-1]
+            op = last_instr.opname
+
             if op in self.TERMINATORS:
-                pass  # No successors
-            elif op in self.JUMPS:
-                target = instr.argval
-                if target is not None and isinstance(target, int):
-                    block.successors.append(target)
-                    self.blocks[target].predecessors.append(current_label)
-                
-                # Check for fall-through
-                idx = self.offset_to_idx[instr.offset]
-                if idx + 1 < len(self.instructions):
-                    if op not in ('JUMP_FORWARD', 'JUMP_BACKWARD', 'JUMP_ABSOLUTE',
-                                  'JUMP_BACKWARD_NO_INTERRUPT'):
-                        # Conditional jump: also falls through
-                        fall_through = self.instructions[idx + 1].offset
-                        if fall_through in self.leaders:
-                            block.successors.append(fall_through)
-                            self.blocks[fall_through].predecessors.append(current_label)
-        
+                continue
+
+            if op in self.JUMPS:
+                target = last_instr.argval
+                if target is not None and isinstance(target, int) and target in self.blocks:
+                    add_edge(label, target)
+
+                # Conditional jumps also fall through to the next block.
+                if op not in ('JUMP_FORWARD', 'JUMP_BACKWARD', 'JUMP_ABSOLUTE',
+                              'JUMP_BACKWARD_NO_INTERRUPT') and next_leader is not None:
+                    add_edge(label, next_leader)
+                continue
+
+            # Straight-line block: execution falls through to the next block.
+            if next_leader is not None:
+                add_edge(label, next_leader)
+
         return self.blocks
 
 
@@ -164,7 +176,7 @@ class StackToANF:
         self.counter = 0
         self.bindings: List[Tuple[ANFVar, ANFExpr]] = []
         self.stack: List[ANFAtom] = []
-        self.locals_map: Dict[str, ANFVar] = {}
+        self.locals_map: Dict[str, ANFAtom] = {}
     
     def fresh(self, hint: str = "t") -> ANFVar:
         """Generate a fresh variable name."""
@@ -195,6 +207,287 @@ class StackToANF:
         v = self.fresh(hint)
         self.bindings.append((v, rhs))
         return ANFAtom(v)
+
+    def _instructions_by_block(self, code: CodeType, cfg: Dict[int, BasicBlock]) -> Dict[int, List[Any]]:
+        """Group bytecode instructions by basic block label."""
+        instructions = list(dis.Bytecode(code))
+        sorted_labels = sorted(cfg.keys())
+        result: Dict[int, List[Any]] = {}
+        for i, label in enumerate(sorted_labels):
+            end = sorted_labels[i + 1] if i + 1 < len(sorted_labels) else 2**31
+            result[label] = [instr for instr in instructions if label <= instr.offset < end]
+        return result
+
+    def _run_block_with_state(
+        self,
+        instructions: List[Any],
+        stack: List[ANFAtom],
+        locals_map: Dict[str, ANFAtom],
+    ) -> Tuple[List[ANFBinding], List[ANFAtom], Dict[str, ANFAtom], Optional[ANFTerminator]]:
+        """Run one block under an explicit stack/local state."""
+        saved_bindings = self.bindings
+        saved_stack = self.stack
+        saved_locals = self.locals_map
+
+        self.bindings = []
+        self.stack = list(stack)
+        self.locals_map = dict(locals_map)
+
+        terminator: Optional[ANFTerminator] = None
+        for i, instr in enumerate(instructions):
+            next_offset = instructions[i + 1].offset if i + 1 < len(instructions) else None
+            terminator = self.step(instr, next_offset=next_offset)
+            if terminator is not None:
+                break
+
+        block_bindings = [ANFBinding(var, rhs) for var, rhs in self.bindings]
+        block_stack = list(self.stack)
+        block_locals = dict(self.locals_map)
+
+        self.bindings = saved_bindings
+        self.stack = saved_stack
+        self.locals_map = saved_locals
+
+        return block_bindings, block_stack, block_locals, terminator
+
+    def _build_join_spec(
+        self,
+        label: int,
+        preds: List[int],
+        exit_stacks: Dict[int, List[ANFAtom]],
+        exit_locals: Dict[int, Dict[str, ANFAtom]],
+        predecessor_states: Dict[int, Dict[int, Any]],
+        existing: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build or refine join parameters for a merge block."""
+        known_preds = [pred for pred in preds if pred in exit_locals]
+        pred_state_map = predecessor_states.get(label, {})
+
+        if len(known_preds) == len(preds) and known_preds:
+            all_local_names = sorted({name for pred in preds for name in exit_locals[pred].keys()})
+            local_names = []
+            for name in all_local_names:
+                values = [exit_locals[pred].get(name, ANFAtom(ANFVar(name))) for pred in preds]
+                if any(value != values[0] for value in values[1:]):
+                    local_names.append(name)
+
+            stack_depth = max(len(exit_stacks.get(pred, [])) for pred in preds)
+            stack_indices = []
+            for i in range(stack_depth):
+                values = [
+                    exit_stacks.get(pred, [])[i] if i < len(exit_stacks.get(pred, [])) else ANFAtom(ANFVar(f"$stack{i}"))
+                    for pred in preds
+                ]
+                if any(value != values[0] for value in values[1:]):
+                    stack_indices.append(i)
+        else:
+            local_names = sorted({
+                name
+                for pred_map in [pred_state_map]
+                for state in pred_map.values()
+                for name in state.locals_ann.keys()
+            } | {
+                name
+                for pred in known_preds
+                for name in exit_locals[pred].keys()
+            })
+            stack_depth = 0
+            if pred_state_map:
+                stack_depth = max(stack_depth, max(len(state.stack.items) for state in pred_state_map.values()))
+            if known_preds:
+                stack_depth = max(stack_depth, max(len(exit_stacks.get(pred, [])) for pred in known_preds))
+            stack_indices = list(range(stack_depth))
+
+        existing_local_vars = (existing or {}).get('local_vars', {})
+        existing_stack_vars = (existing or {}).get('stack_vars', {})
+
+        local_vars = {
+            name: existing_local_vars.get(name, self.fresh(f"j{label}_{name}"))
+            for name in local_names
+        }
+        stack_vars = {
+            i: existing_stack_vars.get(i, self.fresh(f"j{label}_s{i}"))
+            for i in stack_indices
+        }
+
+        if known_preds:
+            base_pred = known_preds[0]
+            env_locals = dict(exit_locals[base_pred])
+            env_stack = list(exit_stacks.get(base_pred, []))
+        else:
+            env_locals = {}
+            env_stack = []
+
+        for name, var in local_vars.items():
+            env_locals[name] = ANFAtom(var)
+
+        needed_stack_len = max(stack_indices, default=-1) + 1
+        while len(env_stack) < needed_stack_len:
+            env_stack.append(ANFAtom(ANFVar(f"$stack{len(env_stack)}")))
+        for i, var in stack_vars.items():
+            env_stack[i] = ANFAtom(var)
+
+        return {
+            'join_var': (existing or {}).get('join_var', self.fresh(f"join{label}")),
+            'local_names': local_names,
+            'stack_indices': stack_indices,
+            'local_vars': local_vars,
+            'stack_vars': stack_vars,
+            'env_locals': env_locals,
+            'env_stack': env_stack,
+        }
+
+    def process_cfg(self, code: Optional[CodeType] = None, max_iterations: int = 4) -> Dict[int, BasicBlock]:
+        """Structured, block-aware ANF transform with explicit join-field invocation."""
+        if code is None:
+            code = self.code
+        if code is None:
+            raise ValueError("No code object provided")
+
+        cfg = CFGBuilder(code).build()
+        if not cfg:
+            return {}
+
+        instructions_by_block = self._instructions_by_block(code, cfg)
+
+        predecessor_states: Dict[int, Dict[int, Any]] = {}
+        try:
+            from .interpreter import AbstractInterpreter
+            from .builtin_lattices import TypeLattice
+            from .builtin_transfers import register_builtin_transfers
+            lattice = TypeLattice()
+            register_builtin_transfers(lattice)
+            analysis = AbstractInterpreter(lattice).analyze_cfg_detailed(code)
+            predecessor_states = analysis.predecessor_states
+        except Exception:
+            predecessor_states = {}
+
+        merge_labels = {label for label, block in cfg.items() if len(block.predecessors) > 1}
+        join_specs: Dict[int, Dict[str, Any]] = {}
+        compiled_blocks: Dict[int, BasicBlock] = {}
+
+        for _ in range(max_iterations):
+            exit_stacks: Dict[int, List[ANFAtom]] = {}
+            exit_locals: Dict[int, Dict[str, ANFAtom]] = {}
+            entry_stacks: Dict[int, List[ANFAtom]] = {0: []}
+            entry_locals: Dict[int, Dict[str, ANFAtom]] = {0: {}}
+            compiled_blocks = {}
+
+            changed = False
+
+            for label in sorted(cfg.keys()):
+                block = cfg[label]
+                block_out = BasicBlock(
+                    label=label,
+                    predecessors=list(block.predecessors),
+                    successors=list(block.successors),
+                )
+
+                if label in merge_labels:
+                    spec = self._build_join_spec(
+                        label,
+                        list(block.predecessors),
+                        exit_stacks,
+                        exit_locals,
+                        predecessor_states,
+                        existing=join_specs.get(label),
+                    )
+                    if join_specs.get(label) != spec:
+                        changed = True
+                    join_specs[label] = spec
+
+                    generic_bindings, generic_stack, generic_locals, generic_term = self._run_block_with_state(
+                        instructions_by_block[label],
+                        spec['env_stack'],
+                        spec['env_locals'],
+                    )
+
+                    fields: List[JoinField] = []
+                    for pred in block.predecessors:
+                        pred_state = predecessor_states.get(label, {}).get(pred)
+                        params: List[JoinParam] = []
+                        for name in spec['local_names']:
+                            ann = pred_state.locals_ann.get(name) if pred_state is not None else None
+                            params.append(JoinParam(spec['local_vars'][name], ann=ann))
+                        for i in spec['stack_indices']:
+                            ann = None
+                            if pred_state is not None and i < len(pred_state.stack.items):
+                                ann = pred_state.stack.items[i].ann
+                            params.append(JoinParam(spec['stack_vars'][i], ann=ann))
+                        fields.append(JoinField(
+                            label=pred,
+                            params=params,
+                            body=ANFBody(bindings=list(generic_bindings), terminator=generic_term),
+                        ))
+
+                    block_out.add_binding(spec['join_var'], ANFJoin(spec['join_var'], fields))
+                    block_out.terminator = None
+                    compiled_blocks[label] = block_out
+                    exit_stacks[label] = generic_stack
+                    exit_locals[label] = generic_locals
+
+                    for succ in block.successors:
+                        entry_stacks.setdefault(succ, list(generic_stack))
+                        entry_locals.setdefault(succ, dict(generic_locals))
+                    continue
+
+                in_stack = entry_stacks.get(label, [])
+                in_locals = entry_locals.get(label, {})
+                block_bindings, out_stack, out_locals, terminator = self._run_block_with_state(
+                    instructions_by_block[label],
+                    in_stack,
+                    in_locals,
+                )
+                block_out.bindings = block_bindings
+                block_out.terminator = terminator
+                exit_stacks[label] = out_stack
+                exit_locals[label] = out_locals
+
+                if len(block.successors) == 1 and block.successors[0] in merge_labels:
+                    succ = block.successors[0]
+                    spec = join_specs.get(succ)
+                    if spec is not None:
+                        args = [
+                            out_locals.get(name, ANFAtom(ANFVar(name)))
+                            for name in spec['local_names']
+                        ] + [
+                            out_stack[i] if i < len(out_stack) else ANFAtom(ANFVar(f"$stack{i}"))
+                            for i in spec['stack_indices']
+                        ]
+                        block_out.terminator = ANFInvokeJoin(spec['join_var'], label, args)
+                elif isinstance(terminator, ANFBranch):
+                    true_label = terminator.true_label
+                    false_label = terminator.false_label
+                    last_op = instructions_by_block[label][-1].opname if instructions_by_block[label] else None
+
+                    true_stack = list(out_stack)
+                    false_stack = list(out_stack)
+                    if last_op == 'FOR_ITER':
+                        false_stack = list(in_stack[:-1]) if in_stack else []
+
+                    if true_label not in merge_labels:
+                        entry_stacks.setdefault(true_label, true_stack)
+                        entry_locals.setdefault(true_label, dict(out_locals))
+                    if false_label not in merge_labels:
+                        entry_stacks.setdefault(false_label, false_stack)
+                        entry_locals.setdefault(false_label, dict(out_locals))
+                elif isinstance(terminator, ANFJump):
+                    succ = terminator.label
+                    if succ not in merge_labels:
+                        entry_stacks.setdefault(succ, list(out_stack))
+                        entry_locals.setdefault(succ, dict(out_locals))
+                elif terminator is None and block.successors:
+                    succ = block.successors[0]
+                    if succ not in merge_labels:
+                        entry_stacks.setdefault(succ, list(out_stack))
+                        entry_locals.setdefault(succ, dict(out_locals))
+
+                compiled_blocks[label] = block_out
+
+            if not changed:
+                break
+
+        return compiled_blocks
     
     def process(self, code: Optional[CodeType] = None) -> Tuple[List[Tuple[ANFVar, ANFExpr]], List[ANFAtom]]:
         """
@@ -234,17 +527,17 @@ class StackToANF:
         
         elif op in ('LOAD_FAST', 'LOAD_FAST_CHECK', 'LOAD_FAST_BORROW'):
             # LOAD_FAST_BORROW (3.14): borrowed ref, same ANF semantics
-            v = self.locals_map.get(arg, ANFVar(arg))
-            self.push(ANFAtom(v))
+            v = self.locals_map.get(arg, ANFAtom(ANFVar(arg)))
+            self.push(v)
         
         elif op in ('LOAD_FAST_LOAD_FAST', 'LOAD_FAST_BORROW_LOAD_FAST_BORROW'):
             # Superinstruction (3.13/3.14): pushes two locals
             # argval = (name1, name2); name1 pushed first (deeper), name2 on top
             name1, name2 = arg
-            v1 = self.locals_map.get(name1, ANFVar(name1))
-            v2 = self.locals_map.get(name2, ANFVar(name2))
-            self.push(ANFAtom(v1))
-            self.push(ANFAtom(v2))
+            v1 = self.locals_map.get(name1, ANFAtom(ANFVar(name1)))
+            v2 = self.locals_map.get(name2, ANFAtom(ANFVar(name2)))
+            self.push(v1)
+            self.push(v2)
         
         elif op == 'LOAD_SMALL_INT':
             # 3.14: optimized small integer load (0-255)
@@ -278,7 +571,7 @@ class StackToANF:
         elif op == 'STORE_FAST':
             val = self.pop()
             v = ANFVar(arg)
-            self.locals_map[arg] = v
+            self.locals_map[arg] = val
             self.bindings.append((v, val))
         
         elif op == 'STORE_FAST_STORE_FAST':
@@ -288,8 +581,8 @@ class StackToANF:
             val2 = self.pop()
             v1 = ANFVar(name1)
             v2 = ANFVar(name2)
-            self.locals_map[name1] = v1
-            self.locals_map[name2] = v2
+            self.locals_map[name1] = val1
+            self.locals_map[name2] = val2
             self.bindings.append((v1, val1))
             self.bindings.append((v2, val2))
         
@@ -298,10 +591,10 @@ class StackToANF:
             name_store, name_load = arg
             val = self.pop()
             v_store = ANFVar(name_store)
-            self.locals_map[name_store] = v_store
+            self.locals_map[name_store] = val
             self.bindings.append((v_store, val))
-            v_load = self.locals_map.get(name_load, ANFVar(name_load))
-            self.push(ANFAtom(v_load))
+            v_load = self.locals_map.get(name_load, ANFAtom(ANFVar(name_load)))
+            self.push(v_load)
         
         elif op == 'STORE_NAME':
             val = self.pop()
@@ -352,6 +645,21 @@ class StackToANF:
             bin_sym = op_map.get(op)
             prim = ANFPrim(bin_sym if bin_sym is not None else op, [a, b])
             self.push(self.bind(prim, hint='b'))
+
+        elif op.startswith('INPLACE_'):
+            b = self.pop()
+            a = self.pop()
+            op_map = {
+                'INPLACE_ADD': '+', 'INPLACE_SUBTRACT': '-',
+                'INPLACE_MULTIPLY': '*', 'INPLACE_TRUE_DIVIDE': '/',
+                'INPLACE_FLOOR_DIVIDE': '//', 'INPLACE_MODULO': '%',
+                'INPLACE_POWER': '**', 'INPLACE_AND': '&',
+                'INPLACE_OR': '|', 'INPLACE_XOR': '^',
+                'INPLACE_LSHIFT': '<<', 'INPLACE_RSHIFT': '>>',
+                'INPLACE_MATRIX_MULTIPLY': '@',
+            }
+            prim = ANFPrim(op_map.get(op, op), [a, b])
+            self.push(self.bind(prim, hint='i'))
         
         # === UNARY OPS ===
         elif op.startswith('UNARY_'):
@@ -516,11 +824,15 @@ class StackToANF:
             self.push(self.bind(ANFPrim('iter', [obj]), hint='it'))
         
         elif op == 'FOR_ITER':
-            # Complex: pushes next value or jumps to end
+            # Iterator loop header: on continue, keep iterator + next value;
+            # on exhaustion, branch to the loop exit.
             it = self.pop()
+            has_next = self.bind(ANFPrim('iter_has_next', [it]), hint='fi')
             val = self.bind(ANFPrim('next', [it]), hint='nx')
-            self.push(ANFAtom(it.value))  # Re-push iterator
-            self.push(val)
+            self.push(it)   # Continue path keeps iterator live
+            self.push(val)  # ...and exposes next item
+            fallthrough = next_offset if next_offset is not None else instr.offset + 2
+            return ANFBranch(has_next, fallthrough, arg)
         
         elif op == 'END_FOR':
             # Pop iterator
@@ -599,8 +911,8 @@ class StackToANF:
         # === 3.12+ opcodes ===
         elif op == 'LOAD_FAST_AND_CLEAR':
             # Load local and set slot to NULL. Used in comprehensions.
-            v = self.locals_map.get(arg, ANFVar(arg)) if isinstance(arg, str) else ANFVar(f'${arg}')
-            self.push(ANFAtom(v))
+            v = self.locals_map.get(arg, ANFAtom(ANFVar(arg))) if isinstance(arg, str) else ANFAtom(ANFVar(f'${arg}'))
+            self.push(v)
 
         elif op == 'LOAD_SUPER_ATTR':
             # 3.12: super() attribute access
@@ -878,7 +1190,7 @@ class StackToANF:
             val = self.pop()
             v = ANFVar(arg) if isinstance(arg, str) else self.fresh('sm')
             if isinstance(arg, str):
-                self.locals_map[arg] = v
+                self.locals_map[arg] = val
             self.bindings.append((v, val))
 
         elif op == 'CALL_FUNCTION_EX':
@@ -949,7 +1261,19 @@ def bytecode_to_anf(code: CodeType) -> List[Tuple[ANFVar, ANFExpr]]:
     return bindings
 
 
+def bytecode_to_anf_cfg(code: CodeType) -> Dict[int, BasicBlock]:
+    """Convert a code object to structured CFG-shaped ANF blocks."""
+    converter = StackToANF(code)
+    return converter.process_cfg()
+
+
 def print_anf(bindings: List[Tuple[ANFVar, ANFExpr]]) -> None:
     """Pretty-print ANF bindings."""
     for var, rhs in bindings:
         print(f"let {var} = {rhs}")
+
+
+def print_anf_cfg(blocks: Dict[int, BasicBlock]) -> None:
+    """Pretty-print structured CFG ANF blocks."""
+    for label in sorted(blocks):
+        print(blocks[label])

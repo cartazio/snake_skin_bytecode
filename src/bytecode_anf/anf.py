@@ -185,7 +185,7 @@ class ANFBinding:
     object copy.
     """
     var: ANFVar
-    rhs: Union[ANFAtom, ANFPrim, ANFCall]
+    rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin]
 
     def __repr__(self) -> str:
         return f"(let {self.var} = {self.rhs})"
@@ -200,7 +200,7 @@ class ANFLet:
     For flat binding sequences, use ANFBody.
     """
     var: ANFVar
-    rhs: Union[ANFAtom, ANFPrim, ANFCall]
+    rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin]
     body: Optional[ANFLet] = None  # None for tail position
 
     def __repr__(self) -> str:
@@ -221,7 +221,7 @@ class ANFBody:
     bindings: List[ANFBinding] = field(default_factory=list)
     terminator: Optional[ANFTerminator] = None
 
-    def add(self, var: ANFVar, rhs: Union[ANFAtom, ANFPrim, ANFCall]) -> None:
+    def add(self, var: ANFVar, rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin]) -> None:
         self.bindings.append(ANFBinding(var, rhs))
 
     def __repr__(self) -> str:
@@ -268,7 +268,19 @@ class ANFReturn:
         return f"(return {self.value})"
 
 
-ANFTerminator = Union[ANFBranch, ANFJump, ANFReturn]
+@dataclass(frozen=True)
+class ANFInvokeJoin:
+    """Explicit join-field invocation."""
+    join: ANFVar
+    field_label: int
+    args: List[ANFAtom] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        args_str = ", ".join(repr(arg) for arg in self.args)
+        return f"(invoke {self.join}.from_B{self.field_label}({args_str}))"
+
+
+ANFTerminator = Union[ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin]
 
 
 # === Join points (codata / additive &) ===

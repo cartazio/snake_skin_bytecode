@@ -4,7 +4,8 @@ import pytest
 import dis
 from bytecode_anf import (
     ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet,
-    StackToANF, CFGBuilder, bytecode_to_anf,
+    ANFJoin, ANFInvokeJoin,
+    StackToANF, CFGBuilder, bytecode_to_anf, bytecode_to_anf_cfg,
     AnnotationLattice, AnnotatedValue, AbstractStack,
     AbstractInterpreter,
     TypeLattice, SimpleType,
@@ -140,6 +141,79 @@ class TestCFGBuilder:
         
         # Should have loop structure
         assert len(leaders) >= 3
+
+    def test_branch_assignment_has_merge_predecessors(self):
+        def branch_assign(cond, x, y):
+            if cond:
+                z = x
+            else:
+                z = y
+            w = z + 1
+            return w
+
+        cfg = CFGBuilder(branch_assign.__code__).build()
+        merge_labels = [label for label, block in cfg.items() if len(block.predecessors) >= 2]
+        assert merge_labels, f"expected a merge block, got {cfg}"
+
+    def test_loop_header_has_entry_and_backedge_predecessors(self):
+        def looping(n):
+            total = 0
+            for i in range(n):
+                total += i
+            return total
+
+        cfg = CFGBuilder(looping.__code__).build()
+        loop_headers = [label for label, block in cfg.items() if len(block.predecessors) >= 2]
+        assert loop_headers, f"expected a loop header with multiple predecessors, got {cfg}"
+
+
+class TestStructuredJoinCFG:
+    """Test structured CFG-shaped ANF with explicit join-field invocation."""
+
+    def test_if_rejoin_emits_join_and_invoke(self):
+        def branch_assign(cond, x, y):
+            if cond:
+                z = x
+            else:
+                z = y
+            w = z + 1
+            return w
+
+        blocks = bytecode_to_anf_cfg(branch_assign.__code__)
+        join_blocks = [
+            block for block in blocks.values()
+            if any(isinstance(binding.rhs, ANFJoin) for binding in block.bindings)
+        ]
+        assert len(join_blocks) == 1
+
+        join_node = next(binding.rhs for binding in join_blocks[0].bindings if isinstance(binding.rhs, ANFJoin))
+        assert len(join_node.fields) == 2
+        assert all(field.body.bindings or field.body.terminator for field in join_node.fields)
+
+        invoke_blocks = [
+            block for block in blocks.values()
+            if isinstance(block.terminator, ANFInvokeJoin)
+        ]
+        assert len(invoke_blocks) >= 2
+        assert {block.terminator.field_label for block in invoke_blocks} >= {field.label for field in join_node.fields}
+
+    def test_loop_header_emits_join(self):
+        def looping(n):
+            total = 0
+            for i in range(n):
+                total += i
+            return total
+
+        blocks = bytecode_to_anf_cfg(looping.__code__)
+        join_nodes = [
+            binding.rhs
+            for block in blocks.values()
+            for binding in block.bindings
+            if isinstance(binding.rhs, ANFJoin)
+        ]
+        assert join_nodes, f"expected at least one join node, got {blocks}"
+        assert any(len(join.fields) >= 2 for join in join_nodes)
+        assert any(isinstance(block.terminator, ANFInvokeJoin) for block in blocks.values())
 
 
 class TestTypeLattice:
@@ -303,6 +377,37 @@ class TestAbstractInterpreter:
         assert len(result.trace) > 0
         # Each trace entry is (opname, stack_state)
         assert all(isinstance(t, tuple) and len(t) == 2 for t in result.trace)
+
+    def test_cfg_detailed_tracks_predecessor_locals(self):
+        def branch_assign(cond, x, y):
+            if cond:
+                z = x
+            else:
+                z = y
+            w = z + 1
+            return w
+
+        interp = AbstractInterpreter(self.lattice)
+        result = interp.analyze_cfg_detailed(
+            branch_assign.__code__,
+            initial_locals={
+                'cond': TypeLattice.BOOL,
+                'x': TypeLattice.INT,
+                'y': TypeLattice.FLOAT,
+            }
+        )
+
+        merge_labels = [label for label, preds in result.predecessor_states.items() if len(preds) >= 2]
+        assert merge_labels, f"expected predecessor states at a merge, got {result.predecessor_states}"
+        merge = merge_labels[0]
+
+        pred_z_types = {
+            state.locals_ann['z']
+            for state in result.predecessor_states[merge].values()
+            if 'z' in state.locals_ann
+        }
+        assert pred_z_types == {TypeLattice.FLOAT, TypeLattice.INT}
+        assert result.entry_states[merge].locals_ann.get('z') == TypeLattice.NUM
 
 
 class TestComputability:

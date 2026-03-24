@@ -74,6 +74,14 @@ class AnalysisResult(Generic[A]):
     warnings: List[str]
 
 
+@dataclass
+class CFGAnalysisResult(Generic[A]):
+    """Detailed CFG analysis result with joined and per-edge state."""
+    entry_states: Dict[int, AnalysisState[A]]
+    exit_states: Dict[int, AnalysisState[A]]
+    predecessor_states: Dict[int, Dict[int, AnalysisState[A]]]
+
+
 class AbstractInterpreter(Generic[A]):
     """
     Abstract interpreter for Python bytecode.
@@ -144,26 +152,24 @@ class AbstractInterpreter(Generic[A]):
             warnings=warnings
         )
 
-    def analyze_cfg(
+    def analyze_cfg_detailed(
         self,
         code: CodeType,
         initial_locals: Optional[Dict[str, A]] = None,
         max_iterations: int = 100
-    ) -> Dict[int, AnalysisState[A]]:
+    ) -> CFGAnalysisResult[A]:
         """
         Analyze with full CFG awareness using worklist algorithm.
 
-        Handles loops and branches correctly by computing
-        a fixpoint over the CFG.
+        Preserves both the joined state at each block entry and the
+        per-predecessor exit state flowing into each successor.
         """
-        # Build CFG
         cfg_builder = CFGBuilder(code)
         blocks = cfg_builder.build()
 
         if not blocks:
-            return {}
+            return CFGAnalysisResult(entry_states={}, exit_states={}, predecessor_states={})
 
-        # Precompute block ranges for O(1) instruction-to-block lookup
         sorted_labels = sorted(blocks.keys())
         block_ranges: Dict[int, Tuple[int, int]] = {}
         for i, label in enumerate(sorted_labels):
@@ -171,16 +177,16 @@ class AbstractInterpreter(Generic[A]):
             end = sorted_labels[i + 1] if i + 1 < len(sorted_labels) else 2**31
             block_ranges[label] = (start, end)
 
-        # Initial state
         init_state = AnalysisState(
             stack=AbstractStack(lattice=self.lattice),
             locals_ann=dict(initial_locals or {})
         )
 
-        # State at entry of each block
+        instructions = list(dis.Bytecode(code))
         entry_states: Dict[int, AnalysisState[A]] = {0: init_state}
+        exit_states: Dict[int, AnalysisState[A]] = {}
+        predecessor_states: Dict[int, Dict[int, AnalysisState[A]]] = {}
 
-        # Worklist
         worklist: Set[int] = {0}
         iterations = 0
 
@@ -192,14 +198,13 @@ class AbstractInterpreter(Generic[A]):
             block = blocks[label]
             state = entry_states[label].copy()
 
-            # Process instructions in this block
             start, end = block_ranges[label]
-            instructions = [
-                instr for instr in dis.Bytecode(code)
+            block_instructions = [
+                instr for instr in instructions
                 if start <= instr.offset < end
             ]
 
-            for instr in instructions:
+            for instr in block_instructions:
                 xfer = self.registry.get_transfer(instr.opname)
                 if xfer is not None:
                     try:
@@ -212,17 +217,37 @@ class AbstractInterpreter(Generic[A]):
                     except Exception:
                         pass
 
-            # Propagate to successors
+            exit_states[label] = state.copy()
+
             for succ_label in block.successors:
-                if succ_label not in entry_states:
-                    entry_states[succ_label] = state.copy()
+                predecessor_states.setdefault(succ_label, {})[label] = state.copy()
+
+                pred_inputs = predecessor_states[succ_label].values()
+                pred_iter = iter(pred_inputs)
+                joined = next(pred_iter).copy()
+                for pred_state in pred_iter:
+                    joined = joined.join_with(pred_state, self.lattice)
+
+                old_state = entry_states.get(succ_label)
+                if old_state is None or not joined.equals(old_state, self.lattice):
+                    entry_states[succ_label] = joined
                     worklist.add(succ_label)
-                else:
-                    old_state = entry_states[succ_label]
-                    new_state = old_state.join_with(state, self.lattice)
 
-                    if not new_state.equals(old_state, self.lattice):
-                        entry_states[succ_label] = new_state
-                        worklist.add(succ_label)
+        return CFGAnalysisResult(
+            entry_states=entry_states,
+            exit_states=exit_states,
+            predecessor_states=predecessor_states,
+        )
 
-        return entry_states
+    def analyze_cfg(
+        self,
+        code: CodeType,
+        initial_locals: Optional[Dict[str, A]] = None,
+        max_iterations: int = 100
+    ) -> Dict[int, AnalysisState[A]]:
+        """Backward-compatible wrapper returning joined block-entry states."""
+        return self.analyze_cfg_detailed(
+            code,
+            initial_locals=initial_locals,
+            max_iterations=max_iterations,
+        ).entry_states

@@ -25,9 +25,18 @@ from .anf import (
     ANFBranch,
     ANFJump,
     ANFReturn,
+    ANFInvokeJoin,
 )
 
-from .stack_to_anf import StackToANF, BasicBlock, CFGBuilder, bytecode_to_anf, print_anf
+from .stack_to_anf import (
+    StackToANF,
+    BasicBlock,
+    CFGBuilder,
+    bytecode_to_anf,
+    bytecode_to_anf_cfg,
+    print_anf,
+    print_anf_cfg,
+)
 
 from .lattice import AnnotationLattice, AnnotatedValue, AbstractStack
 
@@ -40,7 +49,7 @@ from .transfer import (
     get_default_registry,
 )
 
-from .interpreter import AbstractInterpreter
+from .interpreter import AbstractInterpreter, AnalysisState, AnalysisResult, CFGAnalysisResult
 
 from .builtin_lattices import TypeLattice, SimpleType
 
@@ -70,16 +79,22 @@ __all__ = [
     "ANFBranch",
     "ANFJump",
     "ANFReturn",
+    "ANFInvokeJoin",
     # Stack -> ANF conversion
     "StackToANF",
     "BasicBlock",
     "CFGBuilder",
     "bytecode_to_anf",
+    "bytecode_to_anf_cfg",
     "print_anf",
+    "print_anf_cfg",
     # Abstract interpretation
     "AnnotationLattice",
     "AnnotatedValue",
     "AbstractStack",
+    "AnalysisState",
+    "AnalysisResult",
+    "CFGAnalysisResult",
     "AbstractInterpreter",
     # Transfer function DSL
     "TransferRegistry",
