@@ -61,6 +61,13 @@ from .opcode_versions import (
     opcodes_introduced_in,
 )
 
+from .source_ingestion import (
+    SourceCodeUnit,
+    compile_source_file,
+    iter_code_objects,
+    load_source_code_units,
+)
+
 __all__ = [
     # Value model
     "PyObjRef",
@@ -112,6 +119,11 @@ __all__ = [
     "get_opcode_info",
     "opcodes_for_version",
     "opcodes_introduced_in",
+    # Source-file ingestion without importing
+    "SourceCodeUnit",
+    "compile_source_file",
+    "iter_code_objects",
+    "load_source_code_units",
 ]
 
 __version__ = "0.4.0"

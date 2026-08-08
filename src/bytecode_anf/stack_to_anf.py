@@ -12,13 +12,13 @@ to CPS/ANF. Stack positions are continuation variables.
 from __future__ import annotations
 import dis
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Tuple, Optional, Any, Union
+from typing import List, Dict, Set, Tuple, Optional, Any
 from types import CodeType
 
 from .anf import (
-    ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet,
+    ANFVar, ANFAtom, ANFPrim, ANFCall,
     ANFBody, ANFBinding, ANFJoin, JoinField, JoinParam,
-    ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin,
+    ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin, KWArg,
     ANFExpr, ANFTerminator,
 )
 
@@ -177,6 +177,7 @@ class StackToANF:
         self.bindings: List[Tuple[ANFVar, ANFExpr]] = []
         self.stack: List[ANFAtom] = []
         self.locals_map: Dict[str, ANFAtom] = {}
+        self.pending_kw_names: Optional[Tuple[str, ...]] = None
     
     def fresh(self, hint: str = "t") -> ANFVar:
         """Generate a fresh variable name."""
@@ -208,6 +209,25 @@ class StackToANF:
         self.bindings.append((v, rhs))
         return ANFAtom(v)
 
+    @staticmethod
+    def _partition_call_args(
+        args: List[ANFAtom],
+        kw_names: Optional[Tuple[str, ...]],
+    ) -> Tuple[List[ANFAtom], Optional[List[KWArg]]]:
+        """Split CPython's flat call arguments into positional and keyword parts."""
+        if not kw_names:
+            return args, None
+        if len(kw_names) > len(args):
+            raise ValueError("keyword-name count exceeds call argument count")
+
+        positional_count = len(args) - len(kw_names)
+        positional = args[:positional_count]
+        keyword_values = args[positional_count:]
+        keywords = [
+            KWArg(name, value) for name, value in zip(kw_names, keyword_values)
+        ]
+        return positional, keywords
+
     def _instructions_by_block(self, code: CodeType, cfg: Dict[int, BasicBlock]) -> Dict[int, List[Any]]:
         """Group bytecode instructions by basic block label."""
         instructions = list(dis.Bytecode(code))
@@ -228,10 +248,12 @@ class StackToANF:
         saved_bindings = self.bindings
         saved_stack = self.stack
         saved_locals = self.locals_map
+        saved_kw_names = self.pending_kw_names
 
         self.bindings = []
         self.stack = list(stack)
         self.locals_map = dict(locals_map)
+        self.pending_kw_names = None
 
         terminator: Optional[ANFTerminator] = None
         for i, instr in enumerate(instructions):
@@ -247,6 +269,7 @@ class StackToANF:
         self.bindings = saved_bindings
         self.stack = saved_stack
         self.locals_map = saved_locals
+        self.pending_kw_names = saved_kw_names
 
         return block_bindings, block_stack, block_locals, terminator
 
@@ -605,8 +628,8 @@ class StackToANF:
             self.bindings.append((ANFVar(f"${arg}"), ANFPrim('store_global', [ANFAtom(arg), val])))
         
         elif op == 'STORE_ATTR':
-            val = self.pop()
             obj = self.pop()
+            val = self.pop()
             self.bindings.append((self.fresh('sa'), ANFPrim('setattr', [obj, ANFAtom(arg), val])))
         
         elif op == 'STORE_SUBSCR':
@@ -677,8 +700,13 @@ class StackToANF:
             b = self.pop()
             a = self.pop()
             cmp_ops = ['<', '<=', '==', '!=', '>', '>=']
-            # arg encodes the comparison
-            cmp_name = cmp_ops[instr.arg % len(cmp_ops)] if isinstance(instr.arg, int) else str(arg)
+            # ``argval`` is already decoded by dis and remains stable across the
+            # version-specific flag packing used by CPython's numeric oparg.
+            cmp_name = str(arg) if isinstance(arg, str) else (
+                cmp_ops[instr.arg % len(cmp_ops)]
+                if isinstance(instr.arg, int)
+                else str(arg)
+            )
             self.push(self.bind(ANFPrim(f'cmp:{cmp_name}', [a, b]), hint='c'))
         
         elif op == 'IS_OP':
@@ -694,14 +722,28 @@ class StackToANF:
             self.push(self.bind(ANFPrim(prim_name, [a, b]), hint='c'))
         
         # === CALLS ===
+        elif op == 'KW_NAMES':
+            if isinstance(arg, tuple) and all(isinstance(name, str) for name in arg):
+                self.pending_kw_names = tuple(arg)
+            else:
+                self.bindings.append((
+                    self.fresh('unk'),
+                    ANFPrim('?KW_NAMES', [ANFAtom(instr.arg)]),
+                ))
+
         elif op == 'CALL':
             argc = instr.arg
-            args = self.pop_n(argc)
+            flat_args = self.pop_n(argc)
+            args, kwargs = self._partition_call_args(
+                flat_args,
+                self.pending_kw_names,
+            )
+            self.pending_kw_names = None
             func = self.pop()
             # Pop the NULL that PUSH_NULL put there (Python 3.11+)
             if self.stack and self.stack[-1].value is None:
                 self.pop()
-            result = self.bind(ANFCall(func, args), hint='r')
+            result = self.bind(ANFCall(func, args, kwargs=kwargs), hint='r')
             self.push(result)
         
         elif op == 'CALL_FUNCTION':
@@ -713,11 +755,19 @@ class StackToANF:
         
         elif op == 'CALL_FUNCTION_KW':
             # Top of stack is tuple of keyword names
-            kw_names = self.pop()
+            kw_names_atom = self.pop()
             argc = instr.arg
-            args = self.pop_n(argc)
+            flat_args = self.pop_n(argc)
+            raw_names = kw_names_atom.value
+            kw_names = (
+                tuple(raw_names)
+                if isinstance(raw_names, tuple)
+                and all(isinstance(name, str) for name in raw_names)
+                else None
+            )
+            args, kwargs = self._partition_call_args(flat_args, kw_names)
             func = self.pop()
-            result = self.bind(ANFCall(func, args), hint='r')
+            result = self.bind(ANFCall(func, args, kwargs=kwargs), hint='r')
             self.push(result)
         
         elif op == 'CALL_METHOD':
@@ -997,30 +1047,22 @@ class StackToANF:
             kw_names_atom = self.pop()  # Pop the kw_names tuple from stack
             argc = instr.arg
             
-            # Extract the actual tuple from the ANFAtom
-            kw_names_tuple = kw_names_atom.value if isinstance(kw_names_atom, ANFAtom) else None
-            if isinstance(kw_names_tuple, tuple):
-                n_kwargs = len(kw_names_tuple)
-            else:
-                # Couldn't extract tuple - treat all as positional
-                n_kwargs = 0
-                kw_names_tuple = ()
-            
-            n_positional = argc - n_kwargs
-            
-            # Pop all args (keyword args are on top of stack, then positional)
-            all_args = self.pop_n(argc)
-            positional_args = all_args[:n_positional]
-            kw_arg_values = all_args[n_positional:]
+            raw_names = kw_names_atom.value
+            kw_names = (
+                tuple(raw_names)
+                if isinstance(raw_names, tuple)
+                and all(isinstance(name, str) for name in raw_names)
+                else None
+            )
+
+            # Keyword values are on top of the positional values.
+            flat_args = self.pop_n(argc)
+            positional_args, kwargs = self._partition_call_args(flat_args, kw_names)
             
             func = self.pop()
             # Pop NULL if present (3.11+ calling convention)
             if self.stack and self.stack[-1].value is None:
                 self.pop()
-            
-            # Build KWArg list from names and values
-            from .anf import KWArg
-            kwargs = [KWArg(name, val) for name, val in zip(kw_names_tuple, kw_arg_values)] if kw_names_tuple else None
             
             result = self.bind(ANFCall(func, positional_args, kwargs=kwargs), hint='r')
             self.push(result)
@@ -1196,11 +1238,11 @@ class StackToANF:
         elif op == 'CALL_FUNCTION_EX':
             # Call with *args and optionally **kwargs
             if instr.arg & 1:
-                kwargs = self.pop()
+                kwargs_atom = self.pop()
                 args_tuple = self.pop()
                 func = self.pop()
                 result = self.bind(
-                    ANFPrim('call_ex', [func, args_tuple, kwargs]), hint='r')
+                    ANFPrim('call_ex', [func, args_tuple, kwargs_atom]), hint='r')
             else:
                 args_tuple = self.pop()
                 func = self.pop()
