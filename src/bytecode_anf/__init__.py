@@ -74,6 +74,12 @@ from .errors import (
     IRInvariantError,
     FixpointLimitError,
 )
+from .source_ingestion import (
+    SourceCodeUnit,
+    compile_source_file,
+    iter_code_objects,
+    load_source_code_units,
+)
 
 __all__ = [
     # Value model
@@ -138,6 +144,11 @@ __all__ = [
     "TransferFailureError",
     "IRInvariantError",
     "FixpointLimitError",
+    # Source-file ingestion without importing
+    "SourceCodeUnit",
+    "compile_source_file",
+    "iter_code_objects",
+    "load_source_code_units",
 ]
 
 __version__ = "0.4.0"

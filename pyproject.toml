@@ -32,6 +32,9 @@ dev = ["pytest", "pytest-cov", "mypy"]
 [project.urls]
 Homepage = "https://github.com/cartazio/bytecode-anf"
 
+[project.scripts]
+bytecode-anf-source = "bytecode_anf.source_cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bytecode_anf"]
 

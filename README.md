@@ -154,6 +154,21 @@ class TaintLattice(AnnotationLattice[TaintLevel]):
     def leq(self, a, b): return a.level <= b.level
 ```
 
+### Recover Code Objects from Source Without Importing
+
+Compile a source file with the selected Python interpreter, select code objects
+by qualified name, and print CFG-shaped ANF without executing module imports or
+other top-level code:
+
+```bash
+bytecode-anf-source path/to/module.py --select function_name
+bytecode-anf-source path/to/module.py --select ClassName.method
+```
+
+Repeat `--select` to recover multiple code objects. Exact recovery either prints
+a complete CFG or returns a nonzero status with the unsupported bytecode
+operation and offset. Partial inspection is not presented as exact recovery.
+
 ## Docs
 
 The API and design are still evolving—no stable inter-version API yet.

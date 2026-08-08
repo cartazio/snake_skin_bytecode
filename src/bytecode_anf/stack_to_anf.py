@@ -16,9 +16,9 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 from types import CodeType
 
 from .anf import (
-    ANFVar, ANFAtom, ANFPrim, ANFCall, KWArg,
+    ANFVar, ANFAtom, ANFPrim, ANFCall,
     ANFBody, ANFBinding, ANFJoin, JoinField, JoinParam,
-    ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin,
+    ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin, KWArg,
     ANFExpr, ANFTerminator,
 )
 from .errors import (
@@ -945,8 +945,8 @@ class StackToANF:
             )
         
         elif op == 'STORE_ATTR':
-            val = self.pop()
             obj = self.pop()
+            val = self.pop()
             self.emit(
                 self.fresh('sa'),
                 ANFPrim('setattr', [obj, ANFAtom(arg), val]),
@@ -1043,8 +1043,13 @@ class StackToANF:
             b = self.pop()
             a = self.pop()
             cmp_ops = ['<', '<=', '==', '!=', '>', '>=']
-            # arg encodes the comparison
-            cmp_name = cmp_ops[instr.arg % len(cmp_ops)] if isinstance(instr.arg, int) else str(arg)
+            # ``argval`` is already decoded by dis and remains stable across the
+            # version-specific flag packing used by CPython's numeric oparg.
+            cmp_name = str(arg) if isinstance(arg, str) else (
+                cmp_ops[instr.arg % len(cmp_ops)]
+                if isinstance(instr.arg, int)
+                else str(arg)
+            )
             self.push(self.bind(ANFPrim(f'cmp:{cmp_name}', [a, b]), hint='c'))
         
         elif op == 'IS_OP':
