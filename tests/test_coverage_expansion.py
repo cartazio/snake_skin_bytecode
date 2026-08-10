@@ -58,7 +58,7 @@ class TestExceptionOpcodes:
             except:
                 return 0
         
-        converter = StackToANF(with_try.__code__)
+        converter = StackToANF(with_try.__code__, strict=False)
         bindings, _ = converter.process()
         # Should not crash
         assert isinstance(bindings, list)
@@ -71,7 +71,7 @@ class TestExceptionOpcodes:
             except ZeroDivisionError:
                 return 0
         
-        converter = StackToANF(with_typed_except.__code__)
+        converter = StackToANF(with_typed_except.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -97,7 +97,7 @@ class TestMatchOpcodes:
                 case _:
                     return 0
         
-        converter = StackToANF(match_seq.__code__)
+        converter = StackToANF(match_seq.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -110,7 +110,7 @@ class TestMatchOpcodes:
                 case _:
                     return 0
         
-        converter = StackToANF(match_map.__code__)
+        converter = StackToANF(match_map.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -123,7 +123,7 @@ class TestMatchOpcodes:
                 case _:
                     return 0
         
-        converter = StackToANF(match_cls.__code__)
+        converter = StackToANF(match_cls.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
 
@@ -136,7 +136,7 @@ class TestFStringOpcodes:
         def make_fstring(x):
             return f"value: {x}"
         
-        converter = StackToANF(make_fstring.__code__)
+        converter = StackToANF(make_fstring.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -145,7 +145,7 @@ class TestFStringOpcodes:
         def formatted_fstring(x):
             return f"{x:.2f}"
         
-        converter = StackToANF(formatted_fstring.__code__)
+        converter = StackToANF(formatted_fstring.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -154,7 +154,7 @@ class TestFStringOpcodes:
         def repr_fstring(x):
             return f"{x!r}"
         
-        converter = StackToANF(repr_fstring.__code__)
+        converter = StackToANF(repr_fstring.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
 
@@ -167,7 +167,7 @@ class TestComprehensionOpcodes:
         def listcomp(xs):
             return [x * 2 for x in xs]
         
-        converter = StackToANF(listcomp.__code__)
+        converter = StackToANF(listcomp.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -176,7 +176,7 @@ class TestComprehensionOpcodes:
         def setcomp(xs):
             return {x * 2 for x in xs}
         
-        converter = StackToANF(setcomp.__code__)
+        converter = StackToANF(setcomp.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -185,7 +185,7 @@ class TestComprehensionOpcodes:
         def dictcomp(xs):
             return {x: x * 2 for x in xs}
         
-        converter = StackToANF(dictcomp.__code__)
+        converter = StackToANF(dictcomp.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -210,7 +210,7 @@ class TestIterationOpcodes:
                 total += x
             return total
         
-        converter = StackToANF(for_loop.__code__)
+        converter = StackToANF(for_loop.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -223,7 +223,7 @@ class TestIterationOpcodes:
                 n -= 1
             return total
         
-        converter = StackToANF(while_loop.__code__)
+        converter = StackToANF(while_loop.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
 
@@ -247,7 +247,7 @@ class TestUnpackOpcodes:
             a, *rest, z = xs
             return a + z
         
-        converter = StackToANF(unpack_star.__code__)
+        converter = StackToANF(unpack_star.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
 
@@ -420,7 +420,7 @@ class TestBuildOpcodes:
         def build_str(a, b):
             return f"{a}{b}"
         
-        converter = StackToANF(build_str.__code__)
+        converter = StackToANF(build_str.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -576,7 +576,7 @@ class TestControlFlowOpcodes:
         def short_circuit_or(a, b):
             return a or b
         
-        converter = StackToANF(short_circuit_or.__code__)
+        converter = StackToANF(short_circuit_or.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -585,7 +585,7 @@ class TestControlFlowOpcodes:
         def short_circuit_and(a, b):
             return a and b
         
-        converter = StackToANF(short_circuit_and.__code__)
+        converter = StackToANF(short_circuit_and.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
     
@@ -594,7 +594,7 @@ class TestControlFlowOpcodes:
         def ternary(a, b, c):
             return a if b else c
         
-        converter = StackToANF(ternary.__code__)
+        converter = StackToANF(ternary.__code__, strict=False)
         bindings, _ = converter.process()
         assert isinstance(bindings, list)
 
@@ -663,7 +663,7 @@ class TestTransferFunctionsCoverage:
             dct = {"a": 1}
             return lst, tup, st, dct
         
-        interp = AbstractInterpreter(self.lattice)
+        interp = AbstractInterpreter(self.lattice, strict=False)
         result = interp.analyze(collections.__code__)
         if 'lst' in result.locals_ann:
             assert result.locals_ann['lst'] == TypeLattice.LIST

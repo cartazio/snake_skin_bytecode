@@ -7,11 +7,12 @@ custom lattices or more precise semantics.
 """
 
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 from .lattice import AbstractStack, AnnotatedValue
-from .transfer import annotates, annotates_family, get_default_registry, TransferRegistry
+from .transfer import TransferRegistry, get_default_registry
 from .builtin_lattices import TypeLattice, SimpleType
+from .errors import UnsupportedCallError
 
 
 def register_builtin_transfers(
@@ -335,22 +336,42 @@ def _register_build(lattice: TypeLattice, registry: TransferRegistry):
         stack.push(b)
     
     @registry.annotates('COPY')
-    def xfer_copy(stack: AbstractStack, instr, **ctx):
+    def xfer_copy(stack: AbstractStack, instr, strict: bool = False, **ctx):
         n = instr.arg
         if n > 0 and n <= len(stack.items):
             stack.push(stack.items[-n])
+        elif strict:
+            raise IndexError(f"COPY {n} at stack depth {len(stack.items)}")
     
     @registry.annotates('SWAP')
-    def xfer_swap(stack: AbstractStack, instr, **ctx):
+    def xfer_swap(stack: AbstractStack, instr, strict: bool = False, **ctx):
         n = instr.arg
         if n > 0 and n <= len(stack.items):
             stack.items[-1], stack.items[-n] = stack.items[-n], stack.items[-1]
+        elif strict:
+            raise IndexError(f"SWAP {n} at stack depth {len(stack.items)}")
     
     # No-ops
-    @registry.annotates('RESUME', 'PUSH_NULL', 'PRECALL', 'NOP', 'CACHE')
-    def xfer_noop(stack: AbstractStack, instr, **ctx):
+    @registry.annotates(
+        'RESUME', 'PUSH_NULL', 'PRECALL', 'KW_NAMES', 'NOP', 'CACHE'
+    )
+    def xfer_noop(
+        stack: AbstractStack,
+        instr,
+        strict: bool = False,
+        **ctx,
+    ):
         if instr.opname == 'PUSH_NULL':
             stack.push(AnnotatedValue(None, lattice.NONE))
+        elif instr.opname == 'KW_NAMES' and strict:
+            kw_names = instr.argval
+            if not isinstance(kw_names, tuple) or not all(
+                isinstance(name, str) for name in kw_names
+            ):
+                raise UnsupportedCallError(
+                    "KW_NAMES requires a static tuple of keyword names",
+                    instruction=instr,
+                )
     
     # Functions
     @registry.annotates('MAKE_FUNCTION')
@@ -427,9 +448,11 @@ def _register_3_12_plus(lattice: TypeLattice, registry: TransferRegistry):
         stack.push(AnnotatedValue("exc_info", lattice.ANY))
 
     @registry.annotates('POP_EXCEPT')
-    def xfer_pop_except(stack: AbstractStack, instr, **ctx):
+    def xfer_pop_except(stack: AbstractStack, instr, strict: bool = False, **ctx):
         if stack.items:
             stack.pop()
+        elif strict:
+            raise IndexError("POP_EXCEPT at stack depth 0")
 
     @registry.annotates('CHECK_EXC_MATCH')
     def xfer_check_exc_match(stack: AbstractStack, instr, **ctx):
@@ -481,7 +504,7 @@ def _register_3_13_plus(lattice: TypeLattice, registry: TransferRegistry):
     def xfer_call_kw(stack: AbstractStack, instr, **ctx):
         # 3.13: call with keyword args
         # Stack: callable, self/NULL, args..., kw_names_tuple
-        kw_names = stack.pop()
+        stack.pop()  # keyword names tuple
         argc = instr.arg or 0
         for _ in range(argc):
             stack.pop()

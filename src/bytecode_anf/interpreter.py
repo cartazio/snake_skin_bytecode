@@ -9,13 +9,24 @@ Combines:
 
 from __future__ import annotations
 import dis
-from dataclasses import dataclass, field
-from typing import TypeVar, Generic, Dict, List, Tuple, Optional, Any, Set
+from dataclasses import dataclass
+from typing import TypeVar, Generic, Dict, List, Tuple, Optional, Any, Set, cast
 from types import CodeType
 
 from .lattice import AnnotationLattice, AnnotatedValue, AbstractStack
-from .transfer import get_transfer, TransferRegistry, get_default_registry
-from .stack_to_anf import CFGBuilder, BasicBlock
+from .transfer import TransferRegistry, get_default_registry
+from .stack_to_anf import CFGBuilder
+from .errors import (
+    FixpointLimitError,
+    FrontendError,
+    IRInvariantError,
+    StackMergeError,
+    StackOverflowError,
+    StackUnderflowError,
+    TransferFailureError,
+    UnsupportedOpcodeError,
+    unsupported_instruction_error,
+)
 
 A = TypeVar("A")  # Annotation type
 
@@ -55,8 +66,11 @@ class AnalysisState(Generic[A]):
         # Check stacks
         if len(self.stack) != len(other.stack):
             return False
-        for a, b in zip(self.stack.items, other.stack.items):
-            if not (lattice.leq(a.ann, b.ann) and lattice.leq(b.ann, a.ann)):
+        for left_value, right_value in zip(self.stack.items, other.stack.items):
+            if not (
+                lattice.leq(left_value.ann, right_value.ann)
+                and lattice.leq(right_value.ann, left_value.ann)
+            ):
                 return False
         return True
 
@@ -88,12 +102,94 @@ class AbstractInterpreter(Generic[A]):
 
     Propagates annotations through the control flow graph
     using transfer functions from a TransferRegistry.
+
+    Strict analysis is the default. Pass ``strict=False`` only when warnings
+    and incomplete transfer coverage are acceptable exploratory output.
     """
 
-    def __init__(self, lattice: AnnotationLattice[A],
-                 registry: Optional[TransferRegistry] = None):
+    def __init__(
+        self,
+        lattice: AnnotationLattice[A],
+        registry: Optional[TransferRegistry] = None,
+        *,
+        strict: bool = True,
+    ):
         self.lattice = lattice
         self.registry = registry or get_default_registry()
+        self.strict = strict
+
+    def _invoke_transfer(
+        self,
+        stack: AbstractStack[A],
+        instruction: Any,
+        *,
+        locals_ann: Dict[str, A],
+        code: CodeType,
+    ) -> Any:
+        transfer = self.registry.get_transfer(instruction.opname)
+        if transfer is None:
+            if self.strict:
+                raise unsupported_instruction_error(
+                    instruction,
+                    f"no abstract transfer registered for {instruction.opname}",
+                )
+            return None
+
+        try:
+            result = transfer(
+                stack,
+                instruction,
+                locals_ann=locals_ann,
+                lattice=self.lattice,
+                code=code,
+                strict=self.strict,
+            )
+        except FrontendError:
+            raise
+        except IndexError as error:
+            if self.strict:
+                raise StackUnderflowError(
+                    f"abstract transfer underflowed the stack: {error}",
+                    instruction=instruction,
+                ) from error
+            raise
+        except Exception as error:
+            if self.strict:
+                raise TransferFailureError(
+                    f"abstract transfer failed with {type(error).__name__}: {error}",
+                    instruction=instruction,
+                ) from error
+            raise
+
+        if self.strict and not all(
+            isinstance(value, AnnotatedValue) for value in stack.items
+        ):
+            raise IRInvariantError(
+                "abstract transfer put a non-AnnotatedValue on the stack",
+                instruction=instruction,
+            )
+        if self.strict and len(stack) > code.co_stacksize:
+            raise StackOverflowError(
+                f"abstract depth {len(stack)} exceeds co_stacksize {code.co_stacksize}",
+                instruction=instruction,
+            )
+        return result
+
+    def _read_return_result(self, result: Any, instruction: Any) -> Optional[A]:
+        if result is None:
+            return None
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 3
+            or result[0] != "return"
+        ):
+            if self.strict:
+                raise TransferFailureError(
+                    "transfer result must be None or ('return', value, annotation)",
+                    instruction=instruction,
+                )
+            return None
+        return cast(A, result[2])
 
     def analyze(
         self,
@@ -119,27 +215,50 @@ class AbstractInterpreter(Generic[A]):
         return_ann: Optional[A] = None
 
         instructions = list(dis.Bytecode(code))
+        if self.strict and len(CFGBuilder(code).build()) > 1:
+            control_transfer = next(
+                (
+                    instruction
+                    for instruction in instructions
+                    if instruction.opname in CFGBuilder.JUMPS
+                ),
+                None,
+            )
+            raise UnsupportedOpcodeError(
+                "linear abstract interpretation cannot represent control flow; "
+                "use analyze_cfg() or analyze_cfg_detailed()",
+                instruction=control_transfer,
+            )
 
         for instr in instructions:
-            xfer = self.registry.get_transfer(instr.opname)
-
-            if xfer is not None:
-                try:
-                    result = xfer(
-                        stack, instr,
-                        locals_ann=locals_ann,
-                        lattice=self.lattice,
-                        code=code
-                    )
-                    if result is not None:
-                        if result[0] == 'return':
-                            _, val, ann = result
-                            if return_ann is None:
-                                return_ann = ann
-                            else:
-                                return_ann = self.lattice.join(return_ann, ann)
-                except Exception as e:
-                    warnings.append(f"{instr.opname} at offset {instr.offset}: {e}")
+            try:
+                result = self._invoke_transfer(
+                    stack,
+                    instr,
+                    locals_ann=locals_ann,
+                    code=code,
+                )
+                returned_ann = self._read_return_result(result, instr)
+                if returned_ann is not None:
+                    if return_ann is None:
+                        return_ann = returned_ann
+                    else:
+                        return_ann = self.lattice.join(return_ann, returned_ann)
+            except FrontendError as error:
+                if self.strict:
+                    raise
+                warnings.append(
+                    f"{instr.opname} at offset {instr.offset}: {error}"
+                )
+            except Exception as error:
+                if self.strict:
+                    raise TransferFailureError(
+                        f"analysis step failed with {type(error).__name__}: {error}",
+                        instruction=instr,
+                    ) from error
+                warnings.append(
+                    f"{instr.opname} at offset {instr.offset}: {error}"
+                )
 
             if trace:
                 stack_state = [f"{v.value}:{v.ann}" for v in stack.items]
@@ -205,17 +324,24 @@ class AbstractInterpreter(Generic[A]):
             ]
 
             for instr in block_instructions:
-                xfer = self.registry.get_transfer(instr.opname)
-                if xfer is not None:
-                    try:
-                        xfer(
-                            state.stack, instr,
-                            locals_ann=state.locals_ann,
-                            lattice=self.lattice,
-                            code=code
-                        )
-                    except Exception:
-                        pass
+                try:
+                    result = self._invoke_transfer(
+                        state.stack,
+                        instr,
+                        locals_ann=state.locals_ann,
+                        code=code,
+                    )
+                    self._read_return_result(result, instr)
+                except FrontendError:
+                    if self.strict:
+                        raise
+                except Exception as error:
+                    if self.strict:
+                        raise TransferFailureError(
+                            "CFG analysis step failed with "
+                            f"{type(error).__name__}: {error}",
+                            instruction=instr,
+                        ) from error
 
             exit_states[label] = state.copy()
 
@@ -226,12 +352,25 @@ class AbstractInterpreter(Generic[A]):
                 pred_iter = iter(pred_inputs)
                 joined = next(pred_iter).copy()
                 for pred_state in pred_iter:
-                    joined = joined.join_with(pred_state, self.lattice)
+                    try:
+                        joined = joined.join_with(pred_state, self.lattice)
+                    except ValueError as error:
+                        if self.strict:
+                            raise StackMergeError(
+                                f"cannot join predecessor states for B{succ_label}: {error}"
+                            ) from error
+                        raise
 
                 old_state = entry_states.get(succ_label)
                 if old_state is None or not joined.equals(old_state, self.lattice):
                     entry_states[succ_label] = joined
                     worklist.add(succ_label)
+
+        if self.strict and worklist:
+            pending = ", ".join(f"B{label}" for label in sorted(worklist))
+            raise FixpointLimitError(
+                f"CFG worklist did not converge in {max_iterations} steps; pending {pending}"
+            )
 
         return CFGAnalysisResult(
             entry_states=entry_states,

@@ -12,14 +12,24 @@ to CPS/ANF. Stack positions are continuation variables.
 from __future__ import annotations
 import dis
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Tuple, Optional, Any, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 from types import CodeType
 
 from .anf import (
-    ANFVar, ANFAtom, ANFPrim, ANFCall, ANFLet,
+    ANFVar, ANFAtom, ANFPrim, ANFCall, KWArg,
     ANFBody, ANFBinding, ANFJoin, JoinField, JoinParam,
     ANFBranch, ANFJump, ANFReturn, ANFInvokeJoin,
     ANFExpr, ANFTerminator,
+)
+from .errors import (
+    FrontendError,
+    IRInvariantError,
+    StackMergeError,
+    StackOverflowError,
+    StackUnderflowError,
+    UnsupportedCallError,
+    UnsupportedOpcodeError,
+    unsupported_instruction_error,
 )
 
 
@@ -36,7 +46,11 @@ class BasicBlock:
     predecessors: List[int] = field(default_factory=list)
     successors: List[int] = field(default_factory=list)
     
-    def add_binding(self, var: ANFVar, rhs: ANFExpr) -> None:
+    def add_binding(
+        self,
+        var: ANFVar,
+        rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin],
+    ) -> None:
         self.bindings.append(ANFBinding(var, rhs))
     
     def __repr__(self) -> str:
@@ -169,14 +183,21 @@ class StackToANF:
     
     This is Danvy's insight: defunctionalization of the stack
     yields CPS/ANF.
+
+    Strict conversion is the default. Pass ``strict=False`` only for
+    exploratory disassembly that will not feed a correctness-sensitive pass.
     """
     
-    def __init__(self, code: Optional[CodeType] = None):
+    def __init__(self, code: Optional[CodeType] = None, *, strict: bool = True):
         self.code = code
+        self.strict = strict
         self.counter = 0
-        self.bindings: List[Tuple[ANFVar, ANFExpr]] = []
+        self.bindings: List[ANFBinding] = []
         self.stack: List[ANFAtom] = []
         self.locals_map: Dict[str, ANFAtom] = {}
+        self._current_instruction: Any = None
+        self._pending_kw_names: Optional[Tuple[str, ...]] = None
+        self._pending_kw_instruction: Any = None
     
     def fresh(self, hint: str = "t") -> ANFVar:
         """Generate a fresh variable name."""
@@ -190,23 +211,240 @@ class StackToANF:
     def pop(self) -> ANFAtom:
         """Pop and return the top of stack."""
         if not self.stack:
+            if self.strict:
+                raise StackUnderflowError(
+                    "operand stack is empty",
+                    instruction=self._current_instruction,
+                )
             # Return a placeholder for empty stack (shouldn't happen in valid bytecode)
             return ANFAtom(ANFVar("$empty"))
         return self.stack.pop()
     
     def pop_n(self, n: int) -> List[ANFAtom]:
         """Pop n items, return in original push order."""
+        if n < 0:
+            if self.strict:
+                raise StackUnderflowError(
+                    f"cannot pop a negative operand count ({n})",
+                    instruction=self._current_instruction,
+                )
+            return []
+        if n > len(self.stack) and self.strict:
+            raise StackUnderflowError(
+                f"instruction needs {n} operands but stack depth is {len(self.stack)}",
+                instruction=self._current_instruction,
+            )
         if n == 0:
             return []
         result = self.stack[-n:]
         self.stack = self.stack[:-n]
         return result
     
-    def bind(self, rhs: ANFExpr, hint: str = "t") -> ANFAtom:
+    def bind(
+        self,
+        rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin],
+        hint: str = "t",
+    ) -> ANFAtom:
         """Create a let-binding and return the bound variable as an atom."""
         v = self.fresh(hint)
-        self.bindings.append((v, rhs))
+        self.emit(v, rhs)
         return ANFAtom(v)
+
+    def emit(
+        self,
+        var: ANFVar,
+        rhs: Union[ANFAtom, ANFPrim, ANFCall, ANFJoin],
+    ) -> None:
+        """Append one typed binding, checking its shape in strict mode."""
+        if self.strict:
+            self._validate_binding(var, rhs)
+        if not isinstance(rhs, (ANFAtom, ANFPrim, ANFCall, ANFJoin)):
+            raise TypeError(f"ANFBinding cannot contain {type(rhs).__name__}")
+        self.bindings.append(ANFBinding(var, rhs))
+
+    def _validate_binding(self, var: Any, rhs: Any) -> None:
+        if not isinstance(var, ANFVar):
+            raise IRInvariantError(
+                f"binding variable must be ANFVar, got {type(var).__name__}",
+                instruction=self._current_instruction,
+            )
+        if not isinstance(rhs, (ANFAtom, ANFPrim, ANFCall, ANFJoin)):
+            raise IRInvariantError(
+                f"binding right-hand side has invalid type {type(rhs).__name__}",
+                instruction=self._current_instruction,
+            )
+        if isinstance(rhs, ANFPrim) and not all(
+            isinstance(arg, ANFAtom) for arg in rhs.args
+        ):
+            raise IRInvariantError(
+                f"primitive {rhs.op!r} has a non-atomic operand",
+                instruction=self._current_instruction,
+            )
+        if isinstance(rhs, ANFPrim) and not isinstance(rhs.op, str):
+            raise IRInvariantError(
+                "primitive operation name must be a string",
+                instruction=self._current_instruction,
+            )
+        if isinstance(rhs, ANFCall):
+            if not isinstance(rhs.func, ANFAtom) or not all(
+                isinstance(arg, ANFAtom) for arg in rhs.args
+            ):
+                raise IRInvariantError(
+                    "call target and positional arguments must be atomic",
+                    instruction=self._current_instruction,
+                )
+            if rhs.kwargs is not None and not all(
+                isinstance(kw, KWArg)
+                and isinstance(kw.name, str)
+                and isinstance(kw.value, ANFAtom)
+                for kw in rhs.kwargs
+            ):
+                raise IRInvariantError(
+                    "call keyword arguments must have string names and atomic values",
+                    instruction=self._current_instruction,
+                )
+        if isinstance(rhs, ANFJoin):
+            if rhs.name != var:
+                raise IRInvariantError(
+                    "join binding variable must match the join name",
+                    instruction=self._current_instruction,
+                )
+            if not all(isinstance(field, JoinField) for field in rhs.fields):
+                raise IRInvariantError(
+                    "join fields must be JoinField nodes",
+                    instruction=self._current_instruction,
+                )
+            labels = [field.label for field in rhs.fields]
+            if not all(isinstance(label, int) for label in labels):
+                raise IRInvariantError(
+                    "join field labels must be integers",
+                    instruction=self._current_instruction,
+                )
+            if len(labels) != len(set(labels)):
+                raise IRInvariantError(
+                    "join field labels must be unique",
+                    instruction=self._current_instruction,
+                )
+            for field in rhs.fields:
+                if not all(
+                    isinstance(param, JoinParam)
+                    and isinstance(param.var, ANFVar)
+                    for param in field.params
+                ):
+                    raise IRInvariantError(
+                        "join parameters must bind ANFVar nodes",
+                        instruction=self._current_instruction,
+                    )
+                if not isinstance(field.body, ANFBody):
+                    raise IRInvariantError(
+                        "join field body must be ANFBody",
+                        instruction=self._current_instruction,
+                    )
+                self._validate_body(field.body)
+
+    def _validate_body(self, body: ANFBody) -> None:
+        for binding in body.bindings:
+            if not isinstance(binding, ANFBinding):
+                raise IRInvariantError(
+                    "ANF body contains a non-ANFBinding value",
+                    instruction=self._current_instruction,
+                )
+            self._validate_binding(binding.var, binding.rhs)
+        if body.terminator is not None:
+            self._validate_terminator(body.terminator)
+
+    def _validate_terminator(self, terminator: Any) -> None:
+        valid = False
+        if isinstance(terminator, ANFBranch):
+            valid = (
+                isinstance(terminator.cond, ANFAtom)
+                and isinstance(terminator.true_label, int)
+                and isinstance(terminator.false_label, int)
+            )
+        elif isinstance(terminator, ANFJump):
+            valid = isinstance(terminator.label, int)
+        elif isinstance(terminator, ANFReturn):
+            valid = isinstance(terminator.value, ANFAtom)
+        elif isinstance(terminator, ANFInvokeJoin):
+            valid = (
+                isinstance(terminator.join, ANFVar)
+                and isinstance(terminator.field_label, int)
+                and all(isinstance(arg, ANFAtom) for arg in terminator.args)
+            )
+        if not valid:
+            raise IRInvariantError(
+                f"invalid ANF terminator {type(terminator).__name__}",
+                instruction=self._current_instruction,
+            )
+
+    def _validate_cfg(self, blocks: Dict[int, BasicBlock]) -> None:
+        labels = set(blocks)
+        for label, block in blocks.items():
+            if not isinstance(label, int) or block.label != label:
+                raise IRInvariantError("CFG block label is inconsistent")
+            if any(successor not in labels for successor in block.successors):
+                raise IRInvariantError(f"B{label} has an unknown successor")
+            if any(predecessor not in labels for predecessor in block.predecessors):
+                raise IRInvariantError(f"B{label} has an unknown predecessor")
+            if any(
+                label not in blocks[successor].predecessors
+                for successor in block.successors
+            ):
+                raise IRInvariantError(f"B{label} has an asymmetric successor edge")
+            if any(
+                label not in blocks[predecessor].successors
+                for predecessor in block.predecessors
+            ):
+                raise IRInvariantError(f"B{label} has an asymmetric predecessor edge")
+            for binding in block.bindings:
+                if not isinstance(binding, ANFBinding):
+                    raise IRInvariantError(
+                        f"B{label} contains a non-ANFBinding value"
+                    )
+                self._validate_binding(binding.var, binding.rhs)
+            if block.terminator is not None:
+                self._validate_terminator(block.terminator)
+
+    def _validate_state(self, code: CodeType, instruction: Any) -> None:
+        if not self.strict:
+            return
+        if not all(isinstance(atom, ANFAtom) for atom in self.stack):
+            raise IRInvariantError(
+                "operand stack contains a non-atomic IR value",
+                instruction=instruction,
+            )
+        if not all(isinstance(atom, ANFAtom) for atom in self.locals_map.values()):
+            raise IRInvariantError(
+                "local environment contains a non-atomic IR value",
+                instruction=instruction,
+            )
+        if len(self.stack) > code.co_stacksize:
+            raise StackOverflowError(
+                f"simulated depth {len(self.stack)} exceeds co_stacksize {code.co_stacksize}",
+                instruction=instruction,
+            )
+
+    def _run_step(
+        self,
+        code: CodeType,
+        instruction: Any,
+        *,
+        next_offset: Optional[int],
+    ) -> Optional[ANFTerminator]:
+        self._current_instruction = instruction
+        try:
+            terminator = self.step(instruction, next_offset=next_offset)
+            self._validate_state(code, instruction)
+            return terminator
+        except FrontendError:
+            raise
+        except Exception as error:
+            if self.strict:
+                raise IRInvariantError(
+                    f"conversion failed with {type(error).__name__}: {error}",
+                    instruction=instruction,
+                ) from error
+            raise
 
     def _instructions_by_block(self, code: CodeType, cfg: Dict[int, BasicBlock]) -> Dict[int, List[Any]]:
         """Group bytecode instructions by basic block label."""
@@ -220,6 +458,7 @@ class StackToANF:
 
     def _run_block_with_state(
         self,
+        code: CodeType,
         instructions: List[Any],
         stack: List[ANFAtom],
         locals_map: Dict[str, ANFAtom],
@@ -228,27 +467,50 @@ class StackToANF:
         saved_bindings = self.bindings
         saved_stack = self.stack
         saved_locals = self.locals_map
+        saved_instruction = self._current_instruction
+        saved_kw_names = self._pending_kw_names
+        saved_kw_instruction = self._pending_kw_instruction
 
         self.bindings = []
         self.stack = list(stack)
         self.locals_map = dict(locals_map)
+        self._pending_kw_names = None
+        self._pending_kw_instruction = None
 
-        terminator: Optional[ANFTerminator] = None
-        for i, instr in enumerate(instructions):
-            next_offset = instructions[i + 1].offset if i + 1 < len(instructions) else None
-            terminator = self.step(instr, next_offset=next_offset)
-            if terminator is not None:
-                break
+        try:
+            terminator: Optional[ANFTerminator] = None
+            for i, instr in enumerate(instructions):
+                next_offset = (
+                    instructions[i + 1].offset
+                    if i + 1 < len(instructions)
+                    else None
+                )
+                terminator = self._run_step(code, instr, next_offset=next_offset)
+                if terminator is not None:
+                    break
 
-        block_bindings = [ANFBinding(var, rhs) for var, rhs in self.bindings]
-        block_stack = list(self.stack)
-        block_locals = dict(self.locals_map)
+            self._validate_pending_call()
 
-        self.bindings = saved_bindings
-        self.stack = saved_stack
-        self.locals_map = saved_locals
+            return (
+                list(self.bindings),
+                list(self.stack),
+                dict(self.locals_map),
+                terminator,
+            )
+        finally:
+            self.bindings = saved_bindings
+            self.stack = saved_stack
+            self.locals_map = saved_locals
+            self._current_instruction = saved_instruction
+            self._pending_kw_names = saved_kw_names
+            self._pending_kw_instruction = saved_kw_instruction
 
-        return block_bindings, block_stack, block_locals, terminator
+    def _validate_pending_call(self) -> None:
+        if self.strict and self._pending_kw_names is not None:
+            raise UnsupportedCallError(
+                "KW_NAMES was not consumed by a CALL instruction",
+                instruction=self._pending_kw_instruction,
+            )
 
     def _build_join_spec(
         self,
@@ -264,6 +526,17 @@ class StackToANF:
         pred_state_map = predecessor_states.get(label, {})
 
         if len(known_preds) == len(preds) and known_preds:
+            stack_depths = {
+                pred: len(exit_stacks.get(pred, []))
+                for pred in preds
+            }
+            if self.strict and len(set(stack_depths.values())) > 1:
+                rendered = ", ".join(
+                    f"B{pred}={depth}" for pred, depth in sorted(stack_depths.items())
+                )
+                raise StackMergeError(
+                    f"merge block B{label} has incompatible predecessor depths: {rendered}"
+                )
             all_local_names = sorted({name for pred in preds for name in exit_locals[pred].keys()})
             local_names = []
             for name in all_local_names:
@@ -271,7 +544,7 @@ class StackToANF:
                 if any(value != values[0] for value in values[1:]):
                     local_names.append(name)
 
-            stack_depth = max(len(exit_stacks.get(pred, [])) for pred in preds)
+            stack_depth = max(stack_depths.values())
             stack_indices = []
             for i in range(stack_depth):
                 values = [
@@ -355,17 +628,34 @@ class StackToANF:
             from .interpreter import AbstractInterpreter
             from .builtin_lattices import TypeLattice
             from .builtin_transfers import register_builtin_transfers
+            from .transfer import TransferRegistry
+
             lattice = TypeLattice()
-            register_builtin_transfers(lattice)
-            analysis = AbstractInterpreter(lattice).analyze_cfg_detailed(code)
+            registry = TransferRegistry()
+            register_builtin_transfers(lattice, registry=registry)
+            analysis = AbstractInterpreter(
+                lattice,
+                registry=registry,
+                strict=self.strict,
+            ).analyze_cfg_detailed(code)
             predecessor_states = analysis.predecessor_states
-        except Exception:
+        except FrontendError:
+            if self.strict:
+                raise
+            predecessor_states = {}
+        except Exception as error:
+            if self.strict:
+                raise IRInvariantError(
+                    "CFG predecessor analysis failed with "
+                    f"{type(error).__name__}: {error}"
+                ) from error
             predecessor_states = {}
 
         merge_labels = {label for label, block in cfg.items() if len(block.predecessors) > 1}
         join_specs: Dict[int, Dict[str, Any]] = {}
         compiled_blocks: Dict[int, BasicBlock] = {}
 
+        stabilized = False
         for _ in range(max_iterations):
             exit_stacks: Dict[int, List[ANFAtom]] = {}
             exit_locals: Dict[int, Dict[str, ANFAtom]] = {}
@@ -397,6 +687,7 @@ class StackToANF:
                     join_specs[label] = spec
 
                     generic_bindings, generic_stack, generic_locals, generic_term = self._run_block_with_state(
+                        code,
                         instructions_by_block[label],
                         spec['env_stack'],
                         spec['env_locals'],
@@ -434,6 +725,7 @@ class StackToANF:
                 in_stack = entry_stacks.get(label, [])
                 in_locals = entry_locals.get(label, {})
                 block_bindings, out_stack, out_locals, terminator = self._run_block_with_state(
+                    code,
                     instructions_by_block[label],
                     in_stack,
                     in_locals,
@@ -445,16 +737,18 @@ class StackToANF:
 
                 if len(block.successors) == 1 and block.successors[0] in merge_labels:
                     succ = block.successors[0]
-                    spec = join_specs.get(succ)
-                    if spec is not None:
+                    invoke_spec = join_specs.get(succ)
+                    if invoke_spec is not None:
                         args = [
                             out_locals.get(name, ANFAtom(ANFVar(name)))
-                            for name in spec['local_names']
+                            for name in invoke_spec['local_names']
                         ] + [
                             out_stack[i] if i < len(out_stack) else ANFAtom(ANFVar(f"$stack{i}"))
-                            for i in spec['stack_indices']
+                            for i in invoke_spec['stack_indices']
                         ]
-                        block_out.terminator = ANFInvokeJoin(spec['join_var'], label, args)
+                        block_out.terminator = ANFInvokeJoin(
+                            invoke_spec['join_var'], label, args
+                        )
                 elif isinstance(terminator, ANFBranch):
                     true_label = terminator.true_label
                     false_label = terminator.false_label
@@ -485,11 +779,23 @@ class StackToANF:
                 compiled_blocks[label] = block_out
 
             if not changed:
+                stabilized = True
                 break
+
+        if self.strict and not stabilized:
+            raise IRInvariantError(
+                f"join specification did not stabilize in {max_iterations} passes"
+            )
+
+        if self.strict:
+            self._validate_cfg(compiled_blocks)
 
         return compiled_blocks
     
-    def process(self, code: Optional[CodeType] = None) -> Tuple[List[Tuple[ANFVar, ANFExpr]], List[ANFAtom]]:
+    def process(
+        self,
+        code: Optional[CodeType] = None,
+    ) -> Tuple[List[ANFBinding], List[ANFAtom]]:
         """
         Transform bytecode to ANF bindings.
         
@@ -501,10 +807,29 @@ class StackToANF:
             raise ValueError("No code object provided")
         
         instructions = list(dis.Bytecode(code))
+        if self.strict and len(CFGBuilder(code).build()) > 1:
+            control_transfer = next(
+                (
+                    instruction
+                    for instruction in instructions
+                    if instruction.opname in CFGBuilder.JUMPS
+                ),
+                None,
+            )
+            raise UnsupportedOpcodeError(
+                "linear ANF conversion cannot represent control flow; "
+                "use process_cfg() or bytecode_to_anf_cfg()",
+                instruction=control_transfer,
+            )
         for i, instr in enumerate(instructions):
             # Compute next instruction offset for branch fallthrough calculation
             next_offset = instructions[i + 1].offset if i + 1 < len(instructions) else None
-            self.step(instr, next_offset=next_offset)
+            self._run_step(code, instr, next_offset=next_offset)
+
+        self._validate_pending_call()
+        if self.strict:
+            for binding in self.bindings:
+                self._validate_binding(binding.var, binding.rhs)
         
         return self.bindings, self.stack
     
@@ -518,8 +843,20 @@ class StackToANF:
         
         Returns a terminator if this instruction ends the block.
         """
+        self._current_instruction = instr
         op = instr.opname
         arg = instr.argval
+
+        if self._pending_kw_names is not None and op not in (
+            'CALL', 'PRECALL', 'CACHE'
+        ):
+            if self.strict:
+                raise UnsupportedCallError(
+                    f"KW_NAMES must lead directly to CALL, not {op}",
+                    instruction=self._pending_kw_instruction,
+                )
+            self._pending_kw_names = None
+            self._pending_kw_instruction = None
         
         # === LOADS (push) ===
         if op == 'LOAD_CONST':
@@ -570,21 +907,21 @@ class StackToANF:
         # === STORES (pop + bind to name) ===
         elif op == 'STORE_FAST':
             val = self.pop()
-            v = ANFVar(arg)
+            store_var = ANFVar(arg)
             self.locals_map[arg] = val
-            self.bindings.append((v, val))
+            self.emit(store_var, val)
         
         elif op == 'STORE_FAST_STORE_FAST':
             # Superinstruction (3.13): pops TOS → argval[0], TOS-1 → argval[1]
             name1, name2 = arg
             val1 = self.pop()
             val2 = self.pop()
-            v1 = ANFVar(name1)
-            v2 = ANFVar(name2)
+            store_var1 = ANFVar(name1)
+            store_var2 = ANFVar(name2)
             self.locals_map[name1] = val1
             self.locals_map[name2] = val2
-            self.bindings.append((v1, val1))
-            self.bindings.append((v2, val2))
+            self.emit(store_var1, val1)
+            self.emit(store_var2, val2)
         
         elif op == 'STORE_FAST_LOAD_FAST':
             # Superinstruction (3.13): stores TOS → argval[0], loads argval[1]
@@ -592,28 +929,34 @@ class StackToANF:
             val = self.pop()
             v_store = ANFVar(name_store)
             self.locals_map[name_store] = val
-            self.bindings.append((v_store, val))
+            self.emit(v_store, val)
             v_load = self.locals_map.get(name_load, ANFAtom(ANFVar(name_load)))
             self.push(v_load)
         
         elif op == 'STORE_NAME':
             val = self.pop()
-            self.bindings.append((ANFVar(arg), ANFPrim('store_name', [val])))
+            self.emit(ANFVar(arg), ANFPrim('store_name', [val]))
         
         elif op == 'STORE_GLOBAL':
             val = self.pop()
-            self.bindings.append((ANFVar(f"${arg}"), ANFPrim('store_global', [ANFAtom(arg), val])))
+            self.emit(
+                ANFVar(f"${arg}"),
+                ANFPrim('store_global', [ANFAtom(arg), val]),
+            )
         
         elif op == 'STORE_ATTR':
             val = self.pop()
             obj = self.pop()
-            self.bindings.append((self.fresh('sa'), ANFPrim('setattr', [obj, ANFAtom(arg), val])))
+            self.emit(
+                self.fresh('sa'),
+                ANFPrim('setattr', [obj, ANFAtom(arg), val]),
+            )
         
         elif op == 'STORE_SUBSCR':
             val = self.pop()
             key = self.pop()
             obj = self.pop()
-            self.bindings.append((self.fresh('ss'), ANFPrim('setitem', [obj, key, val])))
+            self.emit(self.fresh('ss'), ANFPrim('setitem', [obj, key, val]))
         
         # === BINARY OPS ===
         elif op == 'BINARY_OP':
@@ -627,7 +970,14 @@ class StackToANF:
                 17: '@=', 18: '*=', 19: '%=', 20: '|=', 21: '**=',
                 22: '>>=', 23: '-=', 24: '/=', 25: '^=',
             }
-            op_sym = op_names.get(instr.arg, f'binop{instr.arg}')
+            op_sym = op_names.get(instr.arg)
+            if op_sym is None:
+                if self.strict:
+                    raise UnsupportedOpcodeError(
+                        f"unknown BINARY_OP operation code {instr.arg}",
+                        instruction=instr,
+                    )
+                op_sym = f'binop{instr.arg}'
             self.push(self.bind(ANFPrim(op_sym, [a, b]), hint='b'))
         
         elif op.startswith('BINARY_'):
@@ -643,6 +993,11 @@ class StackToANF:
                 'BINARY_MATRIX_MULTIPLY': '@',
             }
             bin_sym = op_map.get(op)
+            if bin_sym is None and self.strict:
+                raise UnsupportedOpcodeError(
+                    f"unknown binary operation {op}",
+                    instruction=instr,
+                )
             prim = ANFPrim(bin_sym if bin_sym is not None else op, [a, b])
             self.push(self.bind(prim, hint='b'))
 
@@ -658,7 +1013,13 @@ class StackToANF:
                 'INPLACE_LSHIFT': '<<', 'INPLACE_RSHIFT': '>>',
                 'INPLACE_MATRIX_MULTIPLY': '@',
             }
-            prim = ANFPrim(op_map.get(op, op), [a, b])
+            inplace_sym = op_map.get(op)
+            if inplace_sym is None and self.strict:
+                raise UnsupportedOpcodeError(
+                    f"unknown in-place operation {op}",
+                    instruction=instr,
+                )
+            prim = ANFPrim(inplace_sym if inplace_sym is not None else op, [a, b])
             self.push(self.bind(prim, hint='i'))
         
         # === UNARY OPS ===
@@ -669,6 +1030,11 @@ class StackToANF:
                 'UNARY_POSITIVE': '+', 'UNARY_INVERT': '~',
             }
             un_sym = op_map.get(op)
+            if un_sym is None and self.strict:
+                raise UnsupportedOpcodeError(
+                    f"unknown unary operation {op}",
+                    instruction=instr,
+                )
             prim = ANFPrim(un_sym if un_sym is not None else op, [a])
             self.push(self.bind(prim, hint='u'))
         
@@ -695,14 +1061,54 @@ class StackToANF:
         
         # === CALLS ===
         elif op == 'CALL':
-            argc = instr.arg
+            argc = instr.arg or 0
+            pending_kw_names = self._pending_kw_names or ()
+            self._pending_kw_names = None
+            self._pending_kw_instruction = None
+            if len(pending_kw_names) > argc:
+                if self.strict:
+                    raise UnsupportedCallError(
+                        "keyword-name count exceeds CALL argument count",
+                        instruction=instr,
+                    )
+                pending_kw_names = ()
             args = self.pop_n(argc)
             func = self.pop()
             # Pop the NULL that PUSH_NULL put there (Python 3.11+)
             if self.stack and self.stack[-1].value is None:
                 self.pop()
-            result = self.bind(ANFCall(func, args), hint='r')
+            positional_count = argc - len(pending_kw_names)
+            pending_call_kwargs = [
+                KWArg(name, value)
+                for name, value in zip(
+                    pending_kw_names, args[positional_count:]
+                )
+            ]
+            result = self.bind(
+                ANFCall(
+                    func,
+                    args[:positional_count],
+                    kwargs=pending_call_kwargs or None,
+                ),
+                hint='r',
+            )
             self.push(result)
+
+        elif op == 'KW_NAMES':
+            instruction_kw_names = instr.argval
+            if not isinstance(instruction_kw_names, tuple) or not all(
+                isinstance(name, str) for name in instruction_kw_names
+            ):
+                if self.strict:
+                    raise UnsupportedCallError(
+                        "KW_NAMES requires a static tuple of keyword names",
+                        instruction=instr,
+                    )
+                self._pending_kw_names = None
+                self._pending_kw_instruction = None
+            else:
+                self._pending_kw_names = instruction_kw_names
+                self._pending_kw_instruction = instr
         
         elif op == 'CALL_FUNCTION':
             argc = instr.arg
@@ -713,11 +1119,38 @@ class StackToANF:
         
         elif op == 'CALL_FUNCTION_KW':
             # Top of stack is tuple of keyword names
-            kw_names = self.pop()
+            kw_names_atom = self.pop()
             argc = instr.arg
-            args = self.pop_n(argc)
+            all_args = self.pop_n(argc)
             func = self.pop()
-            result = self.bind(ANFCall(func, args), hint='r')
+            kw_names = kw_names_atom.value
+            if not isinstance(kw_names, tuple) or not all(
+                isinstance(name, str) for name in kw_names
+            ):
+                if self.strict:
+                    raise UnsupportedCallError(
+                        "CALL_FUNCTION_KW requires a static tuple of keyword names",
+                        instruction=instr,
+                    )
+                kw_names = ()
+            n_kwargs = len(kw_names)
+            n_positional = argc - n_kwargs
+            if n_positional < 0:
+                if self.strict:
+                    raise UnsupportedCallError(
+                        "keyword-name count exceeds CALL_FUNCTION_KW argument count",
+                        instruction=instr,
+                    )
+                n_positional = argc
+                kw_names = ()
+            kwargs = [
+                KWArg(name, value)
+                for name, value in zip(kw_names, all_args[n_positional:])
+            ]
+            result = self.bind(
+                ANFCall(func, all_args[:n_positional], kwargs=kwargs or None),
+                hint='r',
+            )
             self.push(result)
         
         elif op == 'CALL_METHOD':
@@ -765,7 +1198,7 @@ class StackToANF:
             val = self.pop()
             # The list/set/dict is at stack position -(arg+1)
             # For simplicity, we model this as a side effect
-            self.bindings.append((self.fresh('ext'), ANFPrim(op.lower(), [val])))
+            self.emit(self.fresh('ext'), ANFPrim(op.lower(), [val]))
         
         # === UNPACKING ===
         elif op == 'UNPACK_SEQUENCE':
@@ -784,11 +1217,11 @@ class StackToANF:
         # === CONTROL FLOW ===
         elif op == 'RETURN_VALUE':
             val = self.pop()
-            self.bindings.append((ANFVar('$return'), val))
+            self.emit(ANFVar('$return'), val)
             return ANFReturn(val)
         
         elif op == 'RETURN_CONST':
-            self.bindings.append((ANFVar('$return'), ANFAtom(arg)))
+            self.emit(ANFVar('$return'), ANFAtom(arg))
             return ANFReturn(ANFAtom(arg))
         
         elif op == 'POP_JUMP_IF_FALSE':
@@ -843,6 +1276,11 @@ class StackToANF:
             self.pop()
         
         elif op == 'DUP_TOP':
+            if not self.stack and self.strict:
+                raise StackUnderflowError(
+                    "DUP_TOP requires one operand",
+                    instruction=instr,
+                )
             top = self.stack[-1]
             self.push(top)
         
@@ -865,11 +1303,21 @@ class StackToANF:
             n = instr.arg
             if n > 0 and n <= len(self.stack):
                 self.push(self.stack[-n])
+            elif self.strict:
+                raise StackUnderflowError(
+                    f"COPY {n} is invalid at stack depth {len(self.stack)}",
+                    instruction=instr,
+                )
         
         elif op == 'SWAP':
             n = instr.arg
             if n > 0 and n <= len(self.stack):
                 self.stack[-1], self.stack[-n] = self.stack[-n], self.stack[-1]
+            elif self.strict:
+                raise StackUnderflowError(
+                    f"SWAP {n} is invalid at stack depth {len(self.stack)}",
+                    instruction=instr,
+                )
         
         # === MISC ===
         elif op == 'RESUME':
@@ -905,6 +1353,11 @@ class StackToANF:
         
         elif op == 'IMPORT_FROM':
             # TOS is module, import attr from it
+            if not self.stack and self.strict:
+                raise StackUnderflowError(
+                    "IMPORT_FROM requires the imported module on the stack",
+                    instruction=instr,
+                )
             module = self.stack[-1]  # Don't pop
             self.push(self.bind(ANFPrim('import_from', [module, ANFAtom(arg)]), hint='imp'))
 
@@ -948,7 +1401,12 @@ class StackToANF:
                      'BEFORE_WITH', 'CLEANUP_THROW', 'STOPITERATION_ERROR'):
             # Exception handling opcodes. Record but don't model stack
             # effects precisely (requires exception table CFG edges).
-            self.bindings.append((self.fresh('exc'), ANFPrim(f'exc:{op}', [])))
+            if self.strict:
+                raise UnsupportedOpcodeError(
+                    "exception-table control flow is not modeled exactly",
+                    instruction=instr,
+                )
+            self.emit(self.fresh('exc'), ANFPrim(f'exc:{op}', []))
 
         elif op == 'MATCH_SEQUENCE':
             seq = self.pop()
@@ -967,6 +1425,11 @@ class StackToANF:
 
         elif op == 'MATCH_KEYS':
             keys = self.pop()
+            if not self.stack and self.strict:
+                raise StackUnderflowError(
+                    "MATCH_KEYS requires a mapping below its key tuple",
+                    instruction=instr,
+                )
             mapping = self.stack[-1] if self.stack else ANFAtom(None)
             self.push(self.bind(ANFPrim('match_keys', [mapping, keys]), hint='mk'))
 
@@ -1000,9 +1463,21 @@ class StackToANF:
             # Extract the actual tuple from the ANFAtom
             kw_names_tuple = kw_names_atom.value if isinstance(kw_names_atom, ANFAtom) else None
             if isinstance(kw_names_tuple, tuple):
+                if self.strict and not all(
+                    isinstance(name, str) for name in kw_names_tuple
+                ):
+                    raise UnsupportedCallError(
+                        "CALL_KW keyword names must all be strings",
+                        instruction=instr,
+                    )
                 n_kwargs = len(kw_names_tuple)
             else:
                 # Couldn't extract tuple - treat all as positional
+                if self.strict:
+                    raise UnsupportedCallError(
+                        "CALL_KW requires a static tuple of keyword names",
+                        instruction=instr,
+                    )
                 n_kwargs = 0
                 kw_names_tuple = ()
             
@@ -1019,10 +1494,18 @@ class StackToANF:
                 self.pop()
             
             # Build KWArg list from names and values
-            from .anf import KWArg
-            kwargs = [KWArg(name, val) for name, val in zip(kw_names_tuple, kw_arg_values)] if kw_names_tuple else None
+            call_kw_args = (
+                [
+                    KWArg(name, val)
+                    for name, val in zip(kw_names_tuple, kw_arg_values)
+                ]
+                if kw_names_tuple
+                else None
+            )
             
-            result = self.bind(ANFCall(func, positional_args, kwargs=kwargs), hint='r')
+            result = self.bind(
+                ANFCall(func, positional_args, kwargs=call_kw_args), hint='r'
+            )
             self.push(result)
 
         elif op == 'LOAD_COMMON_CONSTANT':
@@ -1051,7 +1534,14 @@ class StackToANF:
             # 3.13: convert for f-string (1=str, 2=repr, 3=ascii)
             val = self.pop()
             conv_map = {1: 'str', 2: 'repr', 3: 'ascii'}
-            conv_name = conv_map.get(instr.arg, f'convert:{instr.arg}')
+            conv_name = conv_map.get(instr.arg)
+            if conv_name is None:
+                if self.strict:
+                    raise UnsupportedOpcodeError(
+                        f"unknown CONVERT_VALUE operation code {instr.arg}",
+                        instruction=instr,
+                    )
+                conv_name = f'convert:{instr.arg}'
             self.push(self.bind(ANFPrim(conv_name, [val]), hint='cv'))
 
         elif op == 'BINARY_SLICE':
@@ -1067,8 +1557,10 @@ class StackToANF:
             start = self.pop()
             container = self.pop()
             value = self.pop()
-            self.bindings.append((self.fresh('ss'),
-                ANFPrim('setslice', [container, start, end, value])))
+            self.emit(
+                self.fresh('ss'),
+                ANFPrim('setslice', [container, start, end, value]),
+            )
 
         elif op == 'BUILD_INTERPOLATION':
             # 3.14 (PEP 750): template string interpolation
@@ -1127,26 +1619,32 @@ class StackToANF:
         elif op == 'LIST_APPEND':
             # Comprehension: list.append(STACK[-i], TOS)
             item = self.pop()
-            self.bindings.append((self.fresh('la'),
-                ANFPrim('list_append', [ANFAtom(instr.arg), item])))
+            self.emit(
+                self.fresh('la'),
+                ANFPrim('list_append', [ANFAtom(instr.arg), item]),
+            )
 
         elif op == 'SET_ADD':
             # Comprehension: set.add(STACK[-i], TOS)
             item = self.pop()
-            self.bindings.append((self.fresh('sa'),
-                ANFPrim('set_add', [ANFAtom(instr.arg), item])))
+            self.emit(
+                self.fresh('sa'),
+                ANFPrim('set_add', [ANFAtom(instr.arg), item]),
+            )
 
         elif op == 'MAP_ADD':
             # Comprehension: dict[key] = value
             value = self.pop()
             key = self.pop()
-            self.bindings.append((self.fresh('ma'),
-                ANFPrim('map_add', [ANFAtom(instr.arg), key, value])))
+            self.emit(
+                self.fresh('ma'),
+                ANFPrim('map_add', [ANFAtom(instr.arg), key, value]),
+            )
 
         elif op == 'DICT_MERGE':
             # Like DICT_UPDATE but raises on duplicate keys
             val = self.pop()
-            self.bindings.append((self.fresh('dm'), ANFPrim('dict_merge', [val])))
+            self.emit(self.fresh('dm'), ANFPrim('dict_merge', [val]))
 
         elif op == 'UNPACK_EX':
             # Unpack with starred target: a, *b, c = iterable
@@ -1163,44 +1661,58 @@ class StackToANF:
         elif op == 'STORE_DEREF':
             # Store into closure cell
             val = self.pop()
-            self.bindings.append((self.fresh('sd'),
-                ANFPrim('store_deref', [ANFAtom(arg), val])))
+            self.emit(
+                self.fresh('sd'),
+                ANFPrim('store_deref', [ANFAtom(arg), val]),
+            )
 
         elif op in ('DELETE_FAST', 'DELETE_NAME', 'DELETE_GLOBAL',
                      'DELETE_DEREF'):
             # Deletes: no stack effect, record as side effect
-            self.bindings.append((self.fresh('del'),
-                ANFPrim(f'delete:{op}', [ANFAtom(arg)])))
+            self.emit(
+                self.fresh('del'),
+                ANFPrim(f'delete:{op}', [ANFAtom(arg)]),
+            )
 
         elif op == 'DELETE_ATTR':
             # Pops object, deletes attribute
             obj = self.pop()
-            self.bindings.append((self.fresh('da'),
-                ANFPrim('delattr', [obj, ANFAtom(arg)])))
+            self.emit(
+                self.fresh('da'),
+                ANFPrim('delattr', [obj, ANFAtom(arg)]),
+            )
 
         elif op == 'DELETE_SUBSCR':
             # Pops key and object
             key = self.pop()
             obj = self.pop()
-            self.bindings.append((self.fresh('ds'),
-                ANFPrim('delitem', [obj, key])))
+            self.emit(self.fresh('ds'), ANFPrim('delitem', [obj, key]))
 
         elif op == 'STORE_FAST_MAYBE_NULL':
             # Pseudo-op (3.13): same as STORE_FAST
             val = self.pop()
-            v = ANFVar(arg) if isinstance(arg, str) else self.fresh('sm')
+            maybe_store_var = (
+                ANFVar(arg) if isinstance(arg, str) else self.fresh('sm')
+            )
             if isinstance(arg, str):
                 self.locals_map[arg] = val
-            self.bindings.append((v, val))
+            self.emit(maybe_store_var, val)
 
         elif op == 'CALL_FUNCTION_EX':
             # Call with *args and optionally **kwargs
+            if self.strict:
+                raise UnsupportedCallError(
+                    "star-argument calls need an explicit ANF call-spread node",
+                    instruction=instr,
+                )
             if instr.arg & 1:
-                kwargs = self.pop()
+                expanded_kwargs = self.pop()
                 args_tuple = self.pop()
                 func = self.pop()
                 result = self.bind(
-                    ANFPrim('call_ex', [func, args_tuple, kwargs]), hint='r')
+                    ANFPrim('call_ex', [func, args_tuple, expanded_kwargs]),
+                    hint='r',
+                )
             else:
                 args_tuple = self.pop()
                 func = self.pop()
@@ -1226,51 +1738,70 @@ class StackToANF:
 
         elif op in ('END_ASYNC_FOR', 'WITH_EXCEPT_START', 'BEFORE_WITH'):
             # Complex exception/context opcodes: record as side effect
-            self.bindings.append((self.fresh('ctx'),
-                ANFPrim(f'ctx:{op}', [])))
+            if self.strict:
+                raise UnsupportedOpcodeError(
+                    "context-manager exception flow is not modeled exactly",
+                    instruction=instr,
+                )
+            self.emit(self.fresh('ctx'), ANFPrim(f'ctx:{op}', []))
 
         elif op == 'RAISE_VARARGS':
             argc = instr.arg
             args = self.pop_n(argc)
-            self.bindings.append((self.fresh('raise'),
-                ANFPrim('raise', args)))
+            self.emit(self.fresh('raise'), ANFPrim('raise', args))
 
         elif op == 'RERAISE':
+            if self.strict:
+                raise UnsupportedOpcodeError(
+                    "exception-table control flow is not modeled exactly",
+                    instruction=instr,
+                )
             pass  # Re-raises current exception
 
         else:
             # Unknown opcode: record it for completeness
-            self.bindings.append((self.fresh('unk'), ANFPrim(f'?{op}', [ANFAtom(instr.arg)])))
-
-        # Stack depth validation
-        if self.code is not None and len(self.stack) > self.code.co_stacksize + 1:
-            # +1 for tolerance on edge cases (NULL sentinels, etc.)
-            pass  # Could warn; for now just track
+            if self.strict:
+                raise unsupported_instruction_error(instr)
+            self.emit(
+                self.fresh('unk'),
+                ANFPrim(f'?{op}', [ANFAtom(instr.arg)]),
+            )
 
         return None
 
 
-def bytecode_to_anf(code: CodeType) -> List[Tuple[ANFVar, ANFExpr]]:
+def bytecode_to_anf(code: CodeType, *, strict: bool = True) -> List[ANFBinding]:
     """
     Convert a code object to ANF bindings.
     
-    This is the main entry point for simple usage.
+    This is the main entry point for straight-line code. Strict mode is the
+    default and rejects control flow; use ``bytecode_to_anf_cfg`` for branches.
     """
-    converter = StackToANF(code)
+    converter = StackToANF(code, strict=strict)
     bindings, _ = converter.process()
     return bindings
 
 
-def bytecode_to_anf_cfg(code: CodeType) -> Dict[int, BasicBlock]:
+def bytecode_to_anf_cfg(
+    code: CodeType,
+    *,
+    strict: bool = True,
+) -> Dict[int, BasicBlock]:
     """Convert a code object to structured CFG-shaped ANF blocks."""
-    converter = StackToANF(code)
+    converter = StackToANF(code, strict=strict)
     return converter.process_cfg()
 
 
-def print_anf(bindings: List[Tuple[ANFVar, ANFExpr]]) -> None:
+def print_anf(
+    bindings: Iterable[Union[ANFBinding, Tuple[ANFVar, ANFExpr]]],
+) -> None:
     """Pretty-print ANF bindings."""
-    for var, rhs in bindings:
-        print(f"let {var} = {rhs}")
+    for binding in bindings:
+        if isinstance(binding, ANFBinding):
+            print(f"let {binding.var} = {binding.rhs}")
+        else:
+            legacy_var, legacy_rhs = binding
+            print(f"let {legacy_var} = {legacy_rhs}")
 
 
 def print_anf_cfg(blocks: Dict[int, BasicBlock]) -> None:

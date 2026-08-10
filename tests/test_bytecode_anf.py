@@ -426,7 +426,9 @@ class TestComputability:
         ]
         
         for fn in patterns:
-            converter = StackToANF(fn.__code__)
+            # This survey intentionally includes nested control flow. The
+            # strict linear entry point rejects that shape in favor of CFG IR.
+            converter = StackToANF(fn.__code__, strict=False)
             bindings, stack = converter.process()
             # Should not raise, should produce some bindings
             assert isinstance(bindings, list)

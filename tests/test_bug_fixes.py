@@ -138,7 +138,7 @@ class TestPopJumpFallthrough:
                     # (which could be wrong if CACHE entries intervene)
                     
                     # Process with StackToANF
-                    converter = StackToANF(code)
+                    converter = StackToANF(code, strict=False)
                     converter.process()
                     # The test passes if process() doesn't crash
                     # More detailed verification would require inspecting terminators

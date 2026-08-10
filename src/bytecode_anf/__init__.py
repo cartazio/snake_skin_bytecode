@@ -61,6 +61,20 @@ from .opcode_versions import (
     opcodes_introduced_in,
 )
 
+from .errors import (
+    InstructionSite,
+    FrontendError,
+    UnsupportedOpcodeError,
+    UnsupportedCallError,
+    StackDisciplineError,
+    StackUnderflowError,
+    StackOverflowError,
+    StackMergeError,
+    TransferFailureError,
+    IRInvariantError,
+    FixpointLimitError,
+)
+
 __all__ = [
     # Value model
     "PyObjRef",
@@ -112,6 +126,18 @@ __all__ = [
     "get_opcode_info",
     "opcodes_for_version",
     "opcodes_introduced_in",
+    # Strict frontend failures
+    "InstructionSite",
+    "FrontendError",
+    "UnsupportedOpcodeError",
+    "UnsupportedCallError",
+    "StackDisciplineError",
+    "StackUnderflowError",
+    "StackOverflowError",
+    "StackMergeError",
+    "TransferFailureError",
+    "IRInvariantError",
+    "FixpointLimitError",
 ]
 
 __version__ = "0.4.0"

@@ -13,7 +13,7 @@ Recover ANF-style AST from Python bytecode with annotation flow.
 ```bash
 git clone https://github.com/cartazio/snake_skin_bytecode
 cd snake_skin_bytecode
-pip install -e .
+uv sync --extra dev
 ```
 
 ## Usage
@@ -35,6 +35,62 @@ print_anf(bindings)
 # let $b2 = (* z 2)
 # let $return = $b2
 ```
+
+`process()` returns `ANFBinding` nodes. Each node has explicit `.var` and
+`.rhs` fields; two-item unpacking and `[0]`/`[1]` indexing remain available
+for code written against the older tuple representation.
+
+### Sound Frontend by Default
+
+Every public conversion and analysis entry point is strict by default. A
+strict run either returns IR covered by the frontend's modeled semantics or
+raises a typed error; it never hides an unknown instruction in executable IR.
+
+```python
+from bytecode_anf import (
+    AbstractInterpreter,
+    StackToANF,
+    TransferRegistry,
+    TypeLattice,
+)
+from bytecode_anf.builtin_transfers import register_builtin_transfers
+
+bindings, final_stack = StackToANF(example.__code__).process()
+
+lattice = TypeLattice()
+registry = TransferRegistry()
+register_builtin_transfers(lattice, registry=registry)
+result = AbstractInterpreter(
+    lattice,
+    registry=registry,
+).analyze(example.__code__)
+```
+
+Strict conversion and analysis fail with typed `FrontendError` subclasses for
+unsupported opcodes or call forms, stack underflow/overflow or incompatible
+control-flow stacks, invalid ANF shape, transfer failures, and an unfinished
+control-flow fixpoint. The error carries the opcode and bytecode offset when
+an instruction is responsible. `CALL_FUNCTION_EX` (dynamic `*args`/`**kwargs`)
+is intentionally rejected until the IR has an explicit call-spread node.
+
+For branching code, use `bytecode_to_anf_cfg(code)` to retain block structure
+and explicit join invocations, and use
+`AbstractInterpreter.analyze_cfg_detailed(code)` for annotation flow. The
+strict linear entry points reject multi-block bytecode instead of flattening
+different execution paths into one misleading stack history.
+
+Exploratory inspection is available only by asking for it explicitly:
+
+```python
+bindings, final_stack = StackToANF(
+    example.__code__,
+    strict=False,
+).process()
+```
+
+That permissive mode retains unknown instructions as `?OPCODE` primitives and
+records abstract-transfer failures as warnings. It is intentionally incomplete
+and must not feed code generation or another correctness-sensitive pass.
 
 ### Abstract Interpretation with Types
 
