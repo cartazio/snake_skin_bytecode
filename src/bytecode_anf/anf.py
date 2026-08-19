@@ -17,7 +17,7 @@ per-path observations) rather than SSA-style phi nodes.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Iterator, List, Optional, Union
+from typing import Any, List, Optional, Union
 
 
 # === Object references ===
@@ -189,24 +189,6 @@ class ANFBinding:
 
     def __repr__(self) -> str:
         return f"(let {self.var} = {self.rhs})"
-
-    # The converter historically returned raw ``(var, rhs)`` tuples.  Keep
-    # unpacking and integer indexing while making ANFBinding the actual IR
-    # node stored and returned by the frontend.
-    def __iter__(
-        self,
-    ) -> Iterator[Union[ANFVar, ANFAtom, ANFPrim, ANFCall, ANFJoin]]:
-        yield self.var
-        yield self.rhs
-
-    def __getitem__(
-        self, index: int
-    ) -> Union[ANFVar, ANFAtom, ANFPrim, ANFCall, ANFJoin]:
-        return (self.var, self.rhs)[index]
-
-    def __len__(self) -> int:
-        return 2
-
 
 @dataclass
 class ANFLet:

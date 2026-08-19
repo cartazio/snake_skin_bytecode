@@ -33,7 +33,7 @@ class TestSuperinstructions:
         
         converter = StackToANF(swap_assign.__code__)
         bindings, _ = converter.process()
-        var_names = [b[0].name for b in bindings]
+        var_names = [binding.var.name for binding in bindings]
         assert 'a' in var_names or '$t' in ''.join(var_names)
     
     def test_store_fast_load_fast(self):

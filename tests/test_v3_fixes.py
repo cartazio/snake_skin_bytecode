@@ -131,23 +131,26 @@ class TestUnpackOrdering:
         bindings, _ = converter.process()
 
         # Find the assignments to a and b
-        var_names = [b[0].name for b in bindings]
+        var_names = [binding.var.name for binding in bindings]
         assert 'a' in var_names
         assert 'b' in var_names
 
         # Check that a and b are bound (to correct values if using
         # STORE_FAST_STORE_FAST, or to unpack indices if using UNPACK_SEQUENCE)
-        a_binding = next(b for b in bindings if b[0].name == 'a')
-        b_binding = next(b for b in bindings if b[0].name == 'b')
+        a_binding = next(binding for binding in bindings if binding.var.name == 'a')
+        b_binding = next(binding for binding in bindings if binding.var.name == 'b')
 
         # On 3.14+: a, b bound directly from LOAD_SMALL_INT + STORE_FAST_STORE_FAST
         # On <=3.12: a, b bound via UNPACK_SEQUENCE
-        unpack_bindings = [(v, rhs) for v, rhs in bindings
-                          if isinstance(rhs, ANFPrim) and rhs.op == 'unpack']
+        unpack_bindings = [
+            binding.rhs
+            for binding in bindings
+            if isinstance(binding.rhs, ANFPrim) and binding.rhs.op == 'unpack'
+        ]
         if unpack_bindings:
             # Pre-3.13 path: verify unpack indices
             indices = []
-            for _, rhs in unpack_bindings:
+            for rhs in unpack_bindings:
                 assert isinstance(rhs, ANFPrim)
                 idx_arg = rhs.args[1]
                 if isinstance(idx_arg, ANFAtom) and isinstance(idx_arg.value, int):
@@ -157,8 +160,8 @@ class TestUnpackOrdering:
         else:
             # 3.13+ path: direct assignment via superinstructions
             # a should get 0, b should get 1
-            a_rhs = a_binding[1]
-            b_rhs = b_binding[1]
+            a_rhs = a_binding.rhs
+            b_rhs = b_binding.rhs
             assert isinstance(a_rhs, ANFAtom), f"Expected ANFAtom for a, got {type(a_rhs)}"
             assert isinstance(b_rhs, ANFAtom), f"Expected ANFAtom for b, got {type(b_rhs)}"
 
@@ -170,7 +173,7 @@ class TestUnpackOrdering:
 
         converter = StackToANF(triple.__code__)
         bindings, _ = converter.process()
-        var_names = [b[0].name for b in bindings]
+        var_names = [binding.var.name for binding in bindings]
         assert 'x' in var_names
         assert 'y' in var_names
         assert 'z' in var_names

@@ -71,14 +71,16 @@ class TestLoadSuperAttr:
         
         # Look for super_attr primitive
         super_attr_bindings = [
-            (v, rhs) for v, rhs in bindings
-            if isinstance(rhs, ANFPrim) and rhs.op == 'super_attr'
+            binding.rhs
+            for binding in bindings
+            if isinstance(binding.rhs, ANFPrim)
+            and binding.rhs.op == 'super_attr'
         ]
         
         # If LOAD_SUPER_ATTR is used (3.12+), we should have a super_attr prim
         # with the attr name as an argument (from argval, not stack)
         # In older versions, this test just passes vacuously
-        for v, prim in super_attr_bindings:
+        for prim in super_attr_bindings:
             # The attr_name should be an ANFAtom containing 'foo'
             # It should be the last argument to super_attr
             attr_arg = prim.args[-1]
@@ -100,13 +102,12 @@ class TestCallKwKwargs:
         
         # Look for ANFCall bindings
         call_bindings = [
-            (v, rhs) for v, rhs in bindings
-            if isinstance(rhs, ANFCall)
+            binding.rhs for binding in bindings if isinstance(binding.rhs, ANFCall)
         ]
         
         # In Python 3.13+, dict(a=1, b=2) uses CALL_KW
         # The kwargs should be preserved
-        for v, call in call_bindings:
+        for call in call_bindings:
             if call.kwargs is not None:
                 # We found a call with kwargs - verify structure
                 assert isinstance(call.kwargs, list)

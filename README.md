@@ -36,9 +36,8 @@ print_anf(bindings)
 # let $return = $b2
 ```
 
-`process()` returns `ANFBinding` nodes. Each node has explicit `.var` and
-`.rhs` fields; two-item unpacking and `[0]`/`[1]` indexing remain available
-for code written against the older tuple representation.
+`process()` returns `ANFBinding` nodes with explicit `.var` and `.rhs` fields.
+The semantic record has no tuple-unpacking or positional-indexing protocol.
 
 ### Sound Frontend by Default
 

@@ -118,10 +118,6 @@ class TestStrictANFConversion:
 
         assert bindings
         assert all(isinstance(binding, ANFBinding) for binding in bindings)
-        # Compatibility during the tuple-to-node migration.
-        first_var, first_rhs = bindings[0]
-        assert bindings[0][0] == first_var
-        assert bindings[0][1] == first_rhs
 
     def test_call_spread_is_explicitly_unsupported(self):
         def spread_call(function, args):

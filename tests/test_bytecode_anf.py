@@ -62,7 +62,7 @@ class TestStackToANF:
         # Should have: binop, return
         assert len(bindings) >= 2
         # Last binding should be $return
-        assert bindings[-1][0].name == "$return"
+        assert bindings[-1].var.name == "$return"
     
     def test_nested_expr(self):
         def nested(a, b, c):
@@ -83,7 +83,7 @@ class TestStackToANF:
         bindings, _ = converter.process()
         
         # Check that y is bound
-        var_names = [b[0].name for b in bindings]
+        var_names = [binding.var.name for binding in bindings]
         assert "y" in var_names
     
     def test_function_call(self):
@@ -94,11 +94,12 @@ class TestStackToANF:
         bindings, _ = converter.process()
         
         # Should have a call binding
-        has_call = any(isinstance(b[1], ANFCall) for b in bindings if hasattr(b[1], '__class__'))
+        has_call = any(isinstance(binding.rhs, ANFCall) for binding in bindings)
         # or check for call primitive
         has_call_prim = any(
-            hasattr(b[1], 'func') or (hasattr(b[1], 'op') and 'call' in str(b[1]))
-            for b in bindings
+            hasattr(binding.rhs, 'func')
+            or (hasattr(binding.rhs, 'op') and 'call' in str(binding.rhs))
+            for binding in bindings
         )
         assert has_call or has_call_prim or len(bindings) >= 2
 
