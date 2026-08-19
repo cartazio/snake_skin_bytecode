@@ -86,6 +86,7 @@ from .source_ingestion import (
     iter_code_objects,
     load_source_code_units,
 )
+from .anf_executor import ANFExecutionError, execute_anf_cfg
 
 __all__ = [
     # Value model
@@ -160,6 +161,9 @@ __all__ = [
     "compile_source_file",
     "iter_code_objects",
     "load_source_code_units",
+    # Concrete CFG-shaped ANF execution
+    "ANFExecutionError",
+    "execute_anf_cfg",
 ]
 
 __version__ = "0.4.0"
