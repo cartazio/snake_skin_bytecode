@@ -60,6 +60,12 @@ from .opcode_versions import (
     opcodes_for_version,
     opcodes_introduced_in,
 )
+from .opcode_identity import (
+    KnownOpcode,
+    OpcodeIdentity,
+    UnknownOpcode,
+    identify_opcode,
+)
 
 from .errors import (
     InstructionSite,
@@ -132,6 +138,11 @@ __all__ = [
     "get_opcode_info",
     "opcodes_for_version",
     "opcodes_introduced_in",
+    # Closed opcode identity
+    "KnownOpcode",
+    "OpcodeIdentity",
+    "UnknownOpcode",
+    "identify_opcode",
     # Strict frontend failures
     "InstructionSite",
     "FrontendError",

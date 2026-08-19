@@ -9,22 +9,38 @@ for exploratory inspection only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
+
+from .opcode_identity import (
+    OpcodeIdentity,
+    UnknownOpcode,
+    identify_opcode,
+)
 
 
 @dataclass(frozen=True)
 class InstructionSite:
     """Stable location information copied from a ``dis.Instruction``."""
 
-    opname: str
-    offset: Optional[int]
+    opcode: OpcodeIdentity
+    offset: int | None
 
     @classmethod
     def from_instruction(cls, instruction: Any) -> InstructionSite:
+        raw_code = getattr(instruction, "opcode", None)
         return cls(
-            opname=str(getattr(instruction, "opname", "<unknown>")),
+            opcode=identify_opcode(
+                str(getattr(instruction, "opname", "<unknown>")),
+                raw_code if isinstance(raw_code, int) else None,
+            ),
             offset=getattr(instruction, "offset", None),
         )
+
+    @property
+    def opname(self) -> str:
+        if isinstance(self.opcode, UnknownOpcode):
+            return self.opcode.opname
+        return self.opcode.value
 
     def render(self) -> str:
         if self.offset is None:
@@ -40,7 +56,7 @@ class FrontendError(Exception):
         detail: str,
         *,
         instruction: Any = None,
-        site: Optional[InstructionSite] = None,
+        site: InstructionSite | None = None,
     ) -> None:
         if instruction is not None and site is not None:
             raise TypeError("provide instruction or site, not both")
@@ -54,12 +70,16 @@ class FrontendError(Exception):
         super().__init__(f"{detail}{location}")
 
     @property
-    def opname(self) -> Optional[str]:
+    def opname(self) -> str | None:
         return self.site.opname if self.site is not None else None
 
     @property
-    def offset(self) -> Optional[int]:
+    def offset(self) -> int | None:
         return self.site.offset if self.site is not None else None
+
+    @property
+    def opcode_identity(self) -> OpcodeIdentity | None:
+        return self.site.opcode if self.site is not None else None
 
 
 class UnsupportedOpcodeError(FrontendError):
@@ -100,7 +120,7 @@ class FixpointLimitError(FrontendError):
 
 def unsupported_instruction_error(
     instruction: Any,
-    detail: Optional[str] = None,
+    detail: str | None = None,
 ) -> UnsupportedOpcodeError:
     """Classify unsupported call machinery separately from other opcodes."""
 
