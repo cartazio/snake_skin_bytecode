@@ -457,10 +457,94 @@ class StackToANF:
             result[label] = [instr for instr in instructions if label <= instr.offset < end]
         return result
 
+    @staticmethod
+    def _next_instruction_offsets(code: CodeType) -> Dict[int, Optional[int]]:
+        """Map each instruction to the real following bytecode offset."""
+        instructions = list(dis.Bytecode(code))
+        return {
+            instruction.offset: (
+                instructions[index + 1].offset
+                if index + 1 < len(instructions)
+                else None
+            )
+            for index, instruction in enumerate(instructions)
+        }
+
+    @staticmethod
+    def _local_use_def(instructions: List[Any]) -> Tuple[Set[str], Set[str]]:
+        """Return local names used before definition and defined by a block."""
+        used: Set[str] = set()
+        defined: Set[str] = set()
+
+        for instruction in instructions:
+            op = instruction.opname
+            arg = instruction.argval
+
+            loaded: List[str] = []
+            stored: List[str] = []
+            if op in ('LOAD_FAST', 'LOAD_FAST_CHECK', 'LOAD_FAST_BORROW'):
+                if isinstance(arg, str):
+                    loaded = [arg]
+            elif op in ('LOAD_FAST_LOAD_FAST', 'LOAD_FAST_BORROW_LOAD_FAST_BORROW'):
+                if isinstance(arg, tuple):
+                    loaded = [name for name in arg if isinstance(name, str)]
+            elif op in ('STORE_FAST', 'STORE_FAST_MAYBE_NULL', 'DELETE_FAST'):
+                if isinstance(arg, str):
+                    stored = [arg]
+            elif op == 'STORE_FAST_STORE_FAST':
+                if isinstance(arg, tuple):
+                    stored = [name for name in arg if isinstance(name, str)]
+            elif op == 'STORE_FAST_LOAD_FAST':
+                if isinstance(arg, tuple) and len(arg) == 2:
+                    store_name, load_name = arg
+                    if isinstance(store_name, str):
+                        stored = [store_name]
+                    if isinstance(load_name, str):
+                        loaded = [load_name]
+            elif op == 'LOAD_FAST_AND_CLEAR':
+                if isinstance(arg, str):
+                    loaded = [arg]
+                    stored = [arg]
+
+            used.update(name for name in loaded if name not in defined)
+            defined.update(stored)
+
+        return used, defined
+
+    def _live_in_locals(
+        self,
+        cfg: Dict[int, BasicBlock],
+        instructions_by_block: Dict[int, List[Any]],
+    ) -> Dict[int, Set[str]]:
+        """Compute standard backward local-variable liveness for CFG blocks."""
+        uses_defs = {
+            label: self._local_use_def(instructions_by_block[label])
+            for label in cfg
+        }
+        live_in: Dict[int, Set[str]] = {label: set() for label in cfg}
+        live_out: Dict[int, Set[str]] = {label: set() for label in cfg}
+
+        changed = True
+        while changed:
+            changed = False
+            for label in sorted(cfg, reverse=True):
+                used, defined = uses_defs[label]
+                new_out = set().union(
+                    *(live_in[successor] for successor in cfg[label].successors)
+                ) if cfg[label].successors else set()
+                new_in = used | (new_out - defined)
+                if new_in != live_in[label] or new_out != live_out[label]:
+                    live_in[label] = new_in
+                    live_out[label] = new_out
+                    changed = True
+
+        return live_in
+
     def _run_block_with_state(
         self,
         code: CodeType,
         instructions: List[Any],
+        next_offsets: Dict[int, Optional[int]],
         stack: List[ANFAtom],
         locals_map: Dict[str, ANFAtom],
     ) -> Tuple[List[ANFBinding], List[ANFAtom], Dict[str, ANFAtom], Optional[ANFTerminator]]:
@@ -480,12 +564,8 @@ class StackToANF:
 
         try:
             terminator: Optional[ANFTerminator] = None
-            for i, instr in enumerate(instructions):
-                next_offset = (
-                    instructions[i + 1].offset
-                    if i + 1 < len(instructions)
-                    else None
-                )
+            for instr in instructions:
+                next_offset = next_offsets[instr.offset]
                 terminator = self._run_step(code, instr, next_offset=next_offset)
                 if terminator is not None:
                     break
@@ -520,6 +600,7 @@ class StackToANF:
         exit_stacks: Dict[int, List[ANFAtom]],
         exit_locals: Dict[int, Dict[str, ANFAtom]],
         predecessor_states: Dict[int, Dict[int, Any]],
+        live_local_names: Set[str],
         existing: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build or refine join parameters for a merge block."""
@@ -538,7 +619,7 @@ class StackToANF:
                 raise StackMergeError(
                     f"merge block B{label} has incompatible predecessor depths: {rendered}"
                 )
-            all_local_names = sorted({name for pred in preds for name in exit_locals[pred].keys()})
+            all_local_names = sorted(live_local_names)
             local_names = []
             for name in all_local_names:
                 values = [exit_locals[pred].get(name, ANFAtom(ANFVar(name))) for pred in preds]
@@ -555,16 +636,7 @@ class StackToANF:
                 if any(value != values[0] for value in values[1:]):
                     stack_indices.append(i)
         else:
-            local_names = sorted({
-                name
-                for pred_map in [pred_state_map]
-                for state in pred_map.values()
-                for name in state.locals_ann.keys()
-            } | {
-                name
-                for pred in known_preds
-                for name in exit_locals[pred].keys()
-            })
+            local_names = sorted(live_local_names)
             stack_depth = 0
             if pred_state_map:
                 stack_depth = max(stack_depth, max(len(state.stack.items) for state in pred_state_map.values()))
@@ -623,6 +695,8 @@ class StackToANF:
             return {}
 
         instructions_by_block = self._instructions_by_block(code, cfg)
+        next_offsets = self._next_instruction_offsets(code)
+        live_in_locals = self._live_in_locals(cfg, instructions_by_block)
 
         predecessor_states: Dict[int, Dict[int, Any]] = {}
         try:
@@ -681,6 +755,7 @@ class StackToANF:
                         exit_stacks,
                         exit_locals,
                         predecessor_states,
+                        live_in_locals[label],
                         existing=join_specs.get(label),
                     )
                     if join_specs.get(label) != spec:
@@ -690,6 +765,7 @@ class StackToANF:
                     generic_bindings, generic_stack, generic_locals, generic_term = self._run_block_with_state(
                         code,
                         instructions_by_block[label],
+                        next_offsets,
                         spec['env_stack'],
                         spec['env_locals'],
                     )
@@ -728,6 +804,7 @@ class StackToANF:
                 block_bindings, out_stack, out_locals, terminator = self._run_block_with_state(
                     code,
                     instructions_by_block[label],
+                    next_offsets,
                     in_stack,
                     in_locals,
                 )
