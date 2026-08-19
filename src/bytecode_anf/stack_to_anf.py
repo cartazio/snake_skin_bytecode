@@ -31,6 +31,7 @@ from .errors import (
     UnsupportedOpcodeError,
     unsupported_instruction_error,
 )
+from .opcode_identity import UnknownOpcode, identify_opcode
 
 
 @dataclass
@@ -844,7 +845,20 @@ class StackToANF:
         Returns a terminator if this instruction ends the block.
         """
         self._current_instruction = instr
-        op = instr.opname
+        raw_code = getattr(instr, "opcode", None)
+        opcode_identity = identify_opcode(
+            str(instr.opname),
+            raw_code if isinstance(raw_code, int) else None,
+        )
+        if isinstance(opcode_identity, UnknownOpcode):
+            if self.strict:
+                raise unsupported_instruction_error(
+                    instr,
+                    f"unrecognized opcode identity {opcode_identity.opname}",
+                )
+            op = opcode_identity.opname
+        else:
+            op = opcode_identity.value
         arg = instr.argval
 
         if self._pending_kw_names is not None and op not in (

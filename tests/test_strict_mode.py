@@ -22,6 +22,7 @@ from bytecode_anf import (
     TransferFailureError,
     TransferRegistry,
     TypeLattice,
+    UnknownOpcode,
     UnsupportedCallError,
     UnsupportedOpcodeError,
     bytecode_to_anf,
@@ -61,6 +62,10 @@ class TestStrictANFConversion:
 
         assert raised.value.opname == "FUTURE_OPCODE"
         assert raised.value.offset == 42
+        assert raised.value.opcode_identity == UnknownOpcode(
+            opname="FUTURE_OPCODE",
+            raw_code=None,
+        )
 
     def test_unknown_call_form_is_distinct_error(self):
         converter = StackToANF(strict=True)
